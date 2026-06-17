@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[project]
+name = "tongue-ai-service"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic",
+  "pydantic-settings",
+  "orjson",
+  "redis",
+  "elasticsearch>=8.15,<9",
+  "sqlalchemy",
+  "asyncpg",
+  "langgraph",
+  "langgraph-checkpoint-postgres",
+  "langchain",
+  "langmem",
+  "psycopg[binary,pool]",
+  "sentence-transformers",
+  "numpy",
+  "httpx",
+  "tenacity",
+  "structlog"
+]

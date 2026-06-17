@@ -1,0 +1,40 @@
+services:
+  redis:
+    image: redis:7
+    container_name: tongue-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - tongue_redis_data:/data
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: tongue-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tongue_agent
+    volumes:
+      - tongue_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.5
+    container_name: tongue-es
+    ports:
+      - "9200:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    volumes:
+      - tongue_es_data:/usr/share/elasticsearch/data
+    restart: unless-stopped
+
+volumes:
+  tongue_redis_data:
+  tongue_postgres_data:
+  tongue_es_data:
