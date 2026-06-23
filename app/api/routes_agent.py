@@ -48,11 +48,35 @@ def _response_status(final_state: dict[str, Any]) -> str:
 
 
 def _state_snapshot(final_state: dict[str, Any]) -> dict[str, Any]:
+    memory_context = final_state.get("memory_context") or {}
+    tongue_features = final_state.get("tongue_features") or {}
+    rag_context = final_state.get("rag_context") or {}
+    draft_report = final_state.get("draft_report") or {}
     return {
         "current_node": final_state.get("current_node"),
         "intent_result": final_state.get("intent_result"),
         "safety_result": final_state.get("safety_result"),
         "next_action": final_state.get("next_action"),
+        "memory": {
+            "used_memory_ids": memory_context.get("used_memory_ids") or [],
+            "policy": memory_context.get("policy") or {},
+            "write_result": memory_context.get("write_result"),
+            "short_term_write_result": memory_context.get("short_term_write_result"),
+            "session": {
+                "cache_hit": (memory_context.get("session") or {}).get("cache_hit"),
+                "turn_count": (memory_context.get("session") or {}).get("turn_count"),
+            },
+        },
+        "tongue_analysis": {
+            "detected_feature_codes": tongue_features.get("detected_feature_codes")
+            or [],
+            "rag_query": tongue_features.get("rag_query") or "",
+            "rag_grounded": rag_context.get("grounded"),
+            "rag_hit_count": len(rag_context.get("hits") or []),
+            "has_draft_report": bool(final_state.get("draft_report")),
+            "report_status": draft_report.get("report_status"),
+            "rag_evidence_count": len(draft_report.get("rag_evidence") or []),
+        },
     }
 
 

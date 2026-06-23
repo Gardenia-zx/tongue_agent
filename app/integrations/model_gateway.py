@@ -128,13 +128,16 @@ class ChatModelClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        async with self.semaphore:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(
-                    f"{self.base_url}/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
+        try:
+            async with self.semaphore:
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    response = await client.post(
+                        f"{self.base_url}/v1/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    )
+        except httpx.HTTPError as exc:
+            raise ModelGatewayError(f"Chat model request failed: {exc}") from exc
 
         if response.status_code >= 400:
             raise ModelGatewayError(

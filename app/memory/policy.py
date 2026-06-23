@@ -12,6 +12,7 @@ WRITE_TRIGGERS = [
     "我喜欢",
     "我的习惯",
     "请保存",
+    "帮我保存",
 ]
 
 SENSITIVE_HEALTH_KEYWORDS = [
@@ -24,19 +25,50 @@ SENSITIVE_HEALTH_KEYWORDS = [
     "吃药",
     "停药",
     "换药",
+    "药量",
+    "剂量",
     "疾病",
     "诊断",
     "病史",
     "症状",
+    "舌象图片",
+    "舌头照片",
 ]
+
+LOW_RISK_HEALTH_TOPICS = [
+    "湿气",
+    "脾胃",
+    "睡眠",
+    "上火",
+    "气血",
+    "体质",
+    "舌苔",
+    "舌象",
+]
+
+
+@dataclass(frozen=True)
+class MemoryCandidate:
+    memory_type: str
+    memory_key: str
+    text: str
+    summary: str
+    value: str
+    source: str = "explicit_user_input"
 
 
 @dataclass(frozen=True)
 class MemoryPolicyDecision:
     can_read: bool
     can_write: bool
-    write_candidate: str | None
+    memory_candidate: MemoryCandidate | None
     skip_reason: str | None = None
+
+    @property
+    def write_candidate(self) -> str | None:
+        if self.memory_candidate is None:
+            return None
+        return self.memory_candidate.text
 
 
 def extract_user_text(state: AgentState) -> str:
@@ -47,6 +79,123 @@ def extract_user_text(state: AgentState) -> str:
         return content.strip()
 
     return ""
+
+
+def decide_memory_policy(state: AgentState) -> MemoryPolicyDecision:
+    permissions = _memory_permissions(state)
+    text = extract_user_text(state)
+
+    can_read = bool(permissions.get("can_read", True))
+    consent_write = bool(permissions.get("can_write", False))
+
+    if not text:
+        return MemoryPolicyDecision(
+            can_read=can_read,
+            can_write=False,
+            memory_candidate=None,
+            skip_reason="empty_user_text",
+        )
+
+    if _is_high_risk_state(state):
+        return MemoryPolicyDecision(
+            can_read=can_read,
+            can_write=False,
+            memory_candidate=None,
+            skip_reason="high_risk_context_blocked",
+        )
+
+    if not _has_write_trigger(text):
+        return MemoryPolicyDecision(
+            can_read=can_read,
+            can_write=False,
+            memory_candidate=None,
+            skip_reason="no_explicit_memory_request",
+        )
+
+    if not consent_write:
+        return MemoryPolicyDecision(
+            can_read=can_read,
+            can_write=False,
+            memory_candidate=None,
+            skip_reason="missing_long_term_memory_consent",
+        )
+
+    if _is_sensitive_health_text(text):
+        return MemoryPolicyDecision(
+            can_read=can_read,
+            can_write=False,
+            memory_candidate=None,
+            skip_reason="sensitive_health_memory_blocked",
+        )
+
+    candidate = build_memory_candidate(text)
+    if candidate is None:
+        return MemoryPolicyDecision(
+            can_read=can_read,
+            can_write=False,
+            memory_candidate=None,
+            skip_reason="unsupported_memory_type",
+        )
+
+    return MemoryPolicyDecision(
+        can_read=can_read,
+        can_write=True,
+        memory_candidate=candidate,
+        skip_reason=None,
+    )
+
+
+def build_memory_candidate(text: str) -> MemoryCandidate | None:
+    normalized = text.strip()
+    detail_value = _answer_detail_value(normalized)
+    if detail_value:
+        return MemoryCandidate(
+            memory_type="communication_preference",
+            memory_key="communication:answer_detail",
+            text=normalized,
+            summary=f"用户偏好回答{detail_value}。",
+            value=detail_value,
+        )
+
+    if any(word in normalized for word in ["先看结论", "先给结论", "先说结论"]):
+        return MemoryCandidate(
+            memory_type="communication_preference",
+            memory_key="communication:answer_order",
+            text=normalized,
+            summary="用户偏好先看结论，再看解释。",
+            value="先结论后解释",
+        )
+
+    preferred_feature = _preferred_feature(normalized)
+    if preferred_feature:
+        return MemoryCandidate(
+            memory_type="product_preference",
+            memory_key="product:preferred_feature",
+            text=normalized,
+            summary=f"用户更关注{preferred_feature}。",
+            value=preferred_feature,
+        )
+
+    topic = _health_interest_topic(normalized)
+    if topic:
+        return MemoryCandidate(
+            memory_type="health_interest",
+            memory_key=f"health_interest:{topic}",
+            text=normalized,
+            summary=f"用户长期关注{topic}相关健康知识。",
+            value=topic,
+        )
+
+    if any(word in normalized for word in ["偏好", "喜欢", "习惯"]):
+        return MemoryCandidate(
+            memory_type="user_preference",
+            memory_key="user_preference:general",
+            text=normalized,
+            summary=f"用户表达了一个一般偏好：{normalized[:80]}",
+            value=normalized[:120],
+        )
+
+    return None
 
 
 def _memory_permissions(state: AgentState) -> dict[str, Any]:
@@ -67,48 +216,42 @@ def _is_sensitive_health_text(text: str) -> bool:
     return any(keyword in text for keyword in SENSITIVE_HEALTH_KEYWORDS)
 
 
-def decide_memory_policy(state: AgentState) -> MemoryPolicyDecision:
-    permissions = _memory_permissions(state)
-    text = extract_user_text(state)
+def _is_high_risk_state(state: AgentState) -> bool:
+    intent_result = state.get("intent_result") or {}
+    safety_result = state.get("safety_result") or {}
+    risk_level = intent_result.get("risk_level") or safety_result.get("risk_level")
+    return risk_level in {"HIGH", "EMERGENCY"}
 
-    can_read = bool(permissions.get("can_read", True))
-    consent_write = bool(permissions.get("can_write", False))
 
-    if not text:
-        return MemoryPolicyDecision(
-            can_read=can_read,
-            can_write=False,
-            write_candidate=None,
-            skip_reason="empty_user_text",
-        )
+def _answer_detail_value(text: str) -> str | None:
+    if any(word in text for word in ["简短", "短一点", "少说", "别太长", "精简"]):
+        return "简短"
 
-    if not _has_write_trigger(text):
-        return MemoryPolicyDecision(
-            can_read=can_read,
-            can_write=False,
-            write_candidate=None,
-            skip_reason="no_explicit_memory_request",
-        )
+    if any(word in text for word in ["详细", "多解释", "展开", "讲清楚"]):
+        return "详细"
 
-    if not consent_write:
-        return MemoryPolicyDecision(
-            can_read=can_read,
-            can_write=False,
-            write_candidate=None,
-            skip_reason="missing_long_term_memory_consent",
-        )
+    return None
 
-    if _is_sensitive_health_text(text):
-        return MemoryPolicyDecision(
-            can_read=can_read,
-            can_write=False,
-            write_candidate=None,
-            skip_reason="sensitive_health_memory_blocked",
-        )
 
-    return MemoryPolicyDecision(
-        can_read=can_read,
-        can_write=True,
-        write_candidate=text,
-        skip_reason=None,
-    )
+def _preferred_feature(text: str) -> str | None:
+    if any(word in text for word in ["舌象分析", "舌像分析", "看舌头", "舌头照片"]):
+        return "舌象分析"
+
+    if "报告" in text:
+        return "报告解释"
+
+    if any(word in text for word in ["健康知识", "中医知识", "科普"]):
+        return "健康知识问答"
+
+    return None
+
+
+def _health_interest_topic(text: str) -> str | None:
+    if not any(word in text for word in ["关注", "经常问", "常问", "想了解", "以后"]):
+        return None
+
+    for topic in LOW_RISK_HEALTH_TOPICS:
+        if topic in text:
+            return topic
+
+    return None

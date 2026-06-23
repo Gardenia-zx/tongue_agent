@@ -4,6 +4,8 @@ from app.agent.state import AgentState
 GENERAL_CHAT_ROUTE = "general_chat_subgraph"
 MVP_IMPLEMENTED_ROUTES = {
     "tongue_analysis_subgraph",
+    "health_qa_subgraph",
+    "privacy_request_subgraph",
     "high_risk_safety_subgraph",
     "general_chat_subgraph",
 }
