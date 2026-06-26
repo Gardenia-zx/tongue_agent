@@ -10,6 +10,7 @@ class Attachment(BaseModel):
 
 
 class AgentMessage(BaseModel):
+    message_id: str | None = None
     role: Literal["user", "assistant", "system", "tool"]
     content_type: Literal["text", "image", "mixed", "tool_result"] = "text"
     content: str | None = None
@@ -28,14 +29,22 @@ class AgentRunRequest(BaseModel):
     schema_version: str = "1.0"
     request_id: str
     trace_id: str
+    tenant_id: str | None = None
     user_id: int
     thread_id: str
+    thread_epoch: int = 1
+    turn_id: str | None = None
+    user_message_id: str | None = None
+    assistant_message_id: str | None = None
+    request_hash: str | None = None
+    reset_reason: str | None = None
     conversation_id: str | None = None
     report_id: int | None = None
     task_id: int | None = None
     task_version: int | None = None
     message: AgentMessage
     client_context: AgentClientContext = Field(default_factory=AgentClientContext)
+    context_bundle: dict[str, Any] = Field(default_factory=dict)
     options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -48,7 +57,12 @@ class AgentRunResponse(BaseModel):
     schema_version: str = "1.0"
     request_id: str
     trace_id: str
+    tenant_id: str | None = None
+    turn_id: str | None = None
+    response_hash: str | None = None
+    response_ref: dict[str, Any] | None = None
     thread_id: str
+    thread_epoch: int = 1
     conversation_id: str | None = None
     report_id: int | None = None
     task_id: int | None = None
@@ -63,6 +77,22 @@ class AgentRunResponse(BaseModel):
     message: dict[str, Any] | None = None
     next_action: NextAction | None = None
     state_snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentTurnAckRequest(BaseModel):
+    tenant_id: str
+    turn_id: str
+    assistant_message_id: str
+    response_hash: str
+
+
+class AgentTurnAckResponse(BaseModel):
+    status: Literal["ACKED"]
+    tenant_id: str
+    turn_id: str
+    assistant_message_id: str
+    response_hash: str
+
 
 class AgentEvent(BaseModel):
     schema_version: str = "1.0"

@@ -36,10 +36,8 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 
     if left_norm == 0 or right_norm == 0:
         return 0.0
-    # 范围映射[-1,1]->[0,1]
+    # 范围映射[-1,0]->0,后续部分不变
     cosine = dot / (left_norm*right_norm)
-    if cosine <= 0:
-        cosine = 0
     return clamp_score(cosine)
 
 # 关键词匹配得分计算
@@ -48,7 +46,11 @@ def calculate_keyword_score(query: str, keywords: list[str]) -> float:
         return 0.0
 
     query_lower = query.lower()
-    valid_keywords = [keyword.strip().lower() for keyword in keywords if keyword.strip()]
+    valid_keywords = list({
+        keyword.strip().lower()
+        for keyword in keywords
+        if isinstance(keyword, str) and keyword.strip()
+    })
 
     if not valid_keywords:
         return 0.0
@@ -67,6 +69,13 @@ def fuse_intent_score(
     vector_weight: float = 0.5,
     keyword_weight: float = 0.15,
 ) -> IntentScore:
+    if bm25_weight<=0 or vector_weight<=0 or keyword_weight<=0:
+        raise ValueError("score weights must sum to a positive value")
+    weight_sum = (
+        bm25_weight
+        + vector_weight
+        + keyword_weight
+    )
     normalized_bm25 = normalize_bm25(bm25_score, max_bm25_score)
     normalized_vector = clamp_score(vector_score)
     normalized_keyword = clamp_score(keyword_score)
@@ -75,7 +84,7 @@ def fuse_intent_score(
         normalized_bm25 * bm25_weight
         + normalized_vector * vector_weight
         + normalized_keyword * keyword_weight
-    )
+    )/weight_sum
 
     return IntentScore(
         bm25_score=normalized_bm25,

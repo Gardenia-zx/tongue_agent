@@ -1,5 +1,6 @@
 from typing import Any
 
+from app.agent.context_builder import effective_user_query
 from app.agent.state import AgentState
 from app.core.config import get_settings
 from app.integrations.es_client import create_es_client
@@ -35,7 +36,7 @@ def _build_next_action(intent_result: dict[str, Any]) -> dict[str, Any]:
 
 async def intent_node(state: AgentState) -> AgentState:
     settings = get_settings()
-    query = _extract_user_text(state)
+    query = effective_user_query(state) or _extract_user_text(state)
 
     es = create_es_client()
     try:

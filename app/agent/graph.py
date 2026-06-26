@@ -1,14 +1,16 @@
 from langgraph.graph import END, StateGraph
 
+from app.agent.nodes.agent_gate_node import agent_gate_node, select_agent_gate_next
+from app.agent.nodes.agent_loop_node import agent_loop_node
+from app.agent.nodes.context_builder_node import context_builder_node
 from app.agent.nodes.general_chat_node import general_chat_node
 from app.agent.nodes.health_qa_node import health_qa_node
 from app.agent.nodes.intent_node import intent_node
 from app.agent.nodes.memory_node import memory_commit_node, memory_read_node
 from app.agent.nodes.privacy_request_node import privacy_request_node
-from app.agent.nodes.route_node import route_node, select_next_route
+from app.agent.nodes.query_rewrite_node import query_rewrite_node
+from app.agent.nodes.report_followup_node import report_followup_node
 from app.agent.nodes.safety_node import safety_node
-from app.agent.nodes.tongue_analysis_node import tongue_analysis_node
-from app.agent.nodes.tongue_report_node import tongue_report_node
 from app.agent.state import AgentState
 
 
@@ -17,41 +19,36 @@ def build_agent_graph():
 
     graph.add_node("memory_read_node", memory_read_node)
     graph.add_node("memory_commit_node", memory_commit_node)
+    graph.add_node("context_builder_node", context_builder_node)
+    graph.add_node("query_rewrite_node", query_rewrite_node)
     graph.add_node("intent_node", intent_node)
-    graph.add_node("route_node", route_node)
+    graph.add_node("agent_gate_node", agent_gate_node)
+    graph.add_node("agent_loop_node", agent_loop_node)
     graph.add_node("general_chat_node", general_chat_node)
     graph.add_node("health_qa_node", health_qa_node)
     graph.add_node("privacy_request_node", privacy_request_node)
+    graph.add_node("report_followup_node", report_followup_node)
     graph.add_node("safety_node", safety_node)
-    graph.add_node("tongue_analysis_node", tongue_analysis_node)
-    graph.add_node("tongue_report_node", tongue_report_node)
 
     graph.set_entry_point("memory_read_node")
-    graph.add_edge("memory_read_node", "intent_node")
-    graph.add_edge("intent_node", "route_node")
+    graph.add_edge("memory_read_node", "context_builder_node")
+    graph.add_edge("context_builder_node", "query_rewrite_node")
+    graph.add_edge("query_rewrite_node", "intent_node")
+    graph.add_edge("intent_node", "agent_gate_node")
     graph.add_conditional_edges(
-        "route_node",
-        select_next_route,
+        "agent_gate_node",
+        select_agent_gate_next,
         {
-            "general_chat_node": "general_chat_node",
-            "health_qa_node": "health_qa_node",
             "privacy_request_node": "privacy_request_node",
             "safety_node": "safety_node",
-            "tongue_analysis_node": "tongue_analysis_node",
+            "agent_loop_node": "agent_loop_node",
         },
     )
 
+    graph.add_edge("agent_loop_node", "memory_commit_node")
     graph.add_edge("general_chat_node", "memory_commit_node")
     graph.add_edge("health_qa_node", "memory_commit_node")
-    graph.add_conditional_edges(
-        "tongue_analysis_node",
-        select_tongue_analysis_next,
-        {
-            "tongue_report_node": "tongue_report_node",
-            "memory_commit_node": "memory_commit_node",
-        },
-    )
-    graph.add_edge("tongue_report_node", "memory_commit_node")
+    graph.add_edge("report_followup_node", "memory_commit_node")
     graph.add_edge("memory_commit_node", END)
     graph.add_edge("safety_node", END)
     graph.add_edge("privacy_request_node", END)

@@ -2,6 +2,7 @@ import json
 import re
 from typing import Any
 
+from app.agent.context_builder import effective_user_query, with_prompt_context
 from app.agent.state import AgentState
 from app.core.config import get_settings
 from app.integrations.model_gateway import ModelGatewayError, get_chat_model_client
@@ -18,6 +19,9 @@ SYSTEM_PROMPT = """你是中医舌象健康管理系统中的通用聊天助手�
 5. 如果意图识别已经明确，应围绕该意图回答，不要重新泛泛介绍所有功能。
 6. 回答要简洁、自然，适合网页端展示。
 7. 如果上下文里提供了 latest_report，用户问“上一次”“最近一次”“刚才的舌象/报告”时，要基于 latest_report 回答；不要说自己没有历史记录。
+8. 如果用户输入是“详细一点”“继续”“展开说说”“回答详细一点”等短追问，要结合 recent_messages 中上一轮助手回答或 latest_report 继续回答，不要要求用户重新上传图片。
+9. 如果上下文里提供了 context_bundle，要优先基于 context_bundle.active_report、conversation_summary、recent_messages 和 traceback_context 回答。
+10. RAG 知识库已经接入，不要说“后续接入 RAG”。如果需要知识库依据，可以说明“我会结合知识库资料做一般健康参考”。
 
 你必须只返回 JSON，不要返回 Markdown，不要返回额外解释：
 {
@@ -37,7 +41,6 @@ SYSTEM_PROMPT = """你是中医舌象健康管理系统中的通用聊天助手�
 }
 """
 
-
 def _extract_user_text(state: AgentState) -> str:
     message: dict[str, Any] = state.get("message", {})
     content = message.get("content")
@@ -48,11 +51,30 @@ def _extract_user_text(state: AgentState) -> str:
     return ""
 
 
+def _context_bundle_from_state(state: AgentState) -> dict[str, Any]:
+    context_bundle = state.get("context_bundle") or {}
+    if isinstance(context_bundle, dict) and context_bundle:
+        return context_bundle
+
+    client_context = state.get("client_context") or {}
+    client_extra = client_context.get("extra") or {}
+    extra_bundle = client_extra.get("context_bundle") or {}
+    return extra_bundle if isinstance(extra_bundle, dict) else {}
+
+
 def _build_context(state: AgentState) -> dict[str, Any]:
     intent_result = state.get("intent_result") or {}
     memory_context = state.get("memory_context") or {}
     client_context = state.get("client_context") or {}
     client_extra = client_context.get("extra") or {}
+    context_bundle = _context_bundle_from_state(state)
+    latest_report = (
+        context_bundle.get("active_report")
+        or client_extra.get("latest_report")
+        or client_extra.get("latest_report_context")
+        or client_extra.get("frontend_latest_report")
+    )
+    recent_messages = context_bundle.get("recent_messages") or client_extra.get("recent_messages") or []
     candidates = intent_result.get("topk_candidates") or []
 
     return {
@@ -76,10 +98,49 @@ def _build_context(state: AgentState) -> dict[str, Any]:
         "client_context": {
             "page": client_context.get("page"),
             "active_report_id": client_context.get("active_report_id"),
-            "latest_report": client_extra.get("latest_report")
-            or client_extra.get("latest_report_context"),
+            "latest_report": latest_report,
+            "recent_messages": recent_messages,
+            "conversation_summary": context_bundle.get("conversation_summary"),
+            "traceback_context": context_bundle.get("traceback_context"),
+            "context_policy": context_bundle.get("context_policy"),
         },
     }
+
+
+def _is_followup_request(text: str) -> bool:
+    compact = "".join(text.split())
+    if not compact:
+        return False
+    followup_patterns = [
+        "回答详细一点",
+        "详细一点",
+        "再详细一点",
+        "说详细点",
+        "展开说说",
+        "继续说",
+        "继续",
+        "具体一点",
+        "再具体点",
+        "多说一点",
+        "不够详细",
+        "太简单",
+    ]
+    return any(pattern in compact for pattern in followup_patterns)
+
+
+def _last_assistant_content(recent_messages: Any) -> str:
+    if not isinstance(recent_messages, list):
+        return ""
+
+    for item in reversed(recent_messages):
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") != "assistant":
+            continue
+        content = item.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()[:1200]
+    return ""
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -117,7 +178,14 @@ def _fallback_reply(state: AgentState) -> tuple[str, dict[str, Any], dict[str, A
     user_text = _extract_user_text(state)
     client_context = state.get("client_context") or {}
     client_extra = client_context.get("extra") or {}
-    latest_report = client_extra.get("latest_report") or client_extra.get("latest_report_context")
+    context_bundle = _context_bundle_from_state(state)
+    latest_report = (
+        context_bundle.get("active_report")
+        or client_extra.get("latest_report")
+        or client_extra.get("latest_report_context")
+        or client_extra.get("frontend_latest_report")
+    )
+    recent_messages = context_bundle.get("recent_messages") or client_extra.get("recent_messages") or []
 
     tool_decision = {
         "need_rag": False,
@@ -151,13 +219,36 @@ def _fallback_reply(state: AgentState) -> tuple[str, dict[str, Any], dict[str, A
         parts.append("这些内容只能作为一般健康知识和健康管理参考，不能替代医生诊断。")
         return ("".join(parts), tool_decision, quality_review)
 
+    if _is_followup_request(user_text):
+        last_answer = _last_assistant_content(recent_messages)
+        if last_answer:
+            return (
+                "可以，我继续展开上一轮内容。\n\n"
+                f"{last_answer}\n\n"
+                "如果你想继续细化，可以补充最近饮食、睡眠、大便、口腔感觉和是否怕冷或疲乏等情况。"
+                "以上仍只作为一般健康知识参考，不能替代医生诊断。",
+                tool_decision,
+                quality_review,
+            )
+        if isinstance(latest_report, dict):
+            summary = latest_report.get("summary") or latest_report.get("feature_summary")
+            if summary:
+                return (
+                    "可以，我基于最近一次舌象报告再展开说明。\n\n"
+                    f"{summary}\n\n"
+                    "你可以重点观察舌苔厚薄、是否发腻或发干，以及近期腹胀、食欲、大便和疲乏感是否同步变化。"
+                    "以上内容不能替代医生诊断。",
+                    tool_decision,
+                    quality_review,
+                )
+
     if primary_intent == "HEALTH_KNOWLEDGE_QA" or detected_intent == "HEALTH_KNOWLEDGE_QA":
         tool_decision["need_rag"] = True
         tool_decision["suggested_next_node"] = "health_qa_node"
         quality_review["answerable_without_tool"] = False
         return (
-            "你问的是健康知识类问题。当前可以先给你做一般解释；后续接入 RAG 后，会优先基于知识库资料回答。"
-            "如果你想结合自己的舌象情况判断，建议上传舌象图片开始分析。",
+            "你问的是健康知识类问题。知识库检索已经可用，这类问题会优先基于知识库资料做一般健康参考。"
+            "如果你想结合自己的舌象情况判断，可以上传舌象图片或继续围绕当前报告追问。",
             tool_decision,
             quality_review,
         )
@@ -237,8 +328,16 @@ def _normalize_llm_payload(
 
 
 async def general_chat_node(state: AgentState) -> AgentState:
+    state = with_prompt_context(
+        state,
+        mode="FULL_FOR_NODE",
+        system_prompt=SYSTEM_PROMPT,
+        node_name="general_chat_node",
+        include_long_term_memory=True,
+    )
     settings = get_settings()
     user_text = _extract_user_text(state)
+    standalone_query = effective_user_query(state) or user_text
     context = _build_context(state)
 
     messages = [
@@ -251,17 +350,23 @@ async def general_chat_node(state: AgentState) -> AgentState:
             "content": json.dumps(
                 {
                     "user_input": user_text or "",
+                    "standalone_query": standalone_query or "",
+                    "prompt_context": state.get("prompt_context") or {},
                     "intent_context": context,
                     "mvp_status": {
-                        "rag_ready": False,
+                        "rag_ready": True,
                         "web_search_ready": False,
                         "tongue_analysis_node_ready": True,
                     },
                     "response_instruction": (
                         "如果是健康知识问题，可以先给一般性解释，但要说明不能替代医生诊断；"
                         "如果需要知识库证据，tool_decision.need_rag=true；"
+                        "RAG 知识库已经接入，禁止说“后续接入 RAG”；"
                         "如果用户问上一次、最近一次、刚才的舌象或报告，优先基于"
-                        "intent_context.client_context.latest_report 回答。"
+                        "intent_context.client_context.latest_report 回答；"
+                        "如果用户只是说详细一点、继续、展开说说，要基于"
+                        "intent_context.client_context.recent_messages 的上一轮助手回答继续展开，"
+                        "不要说没有看到图片，也不要要求重新上传。"
                     ),
                 },
                 ensure_ascii=False,
@@ -299,6 +404,7 @@ async def general_chat_node(state: AgentState) -> AgentState:
             "payload": {
                 "status": "COMPLETED",
                 "route_target": "general_chat_subgraph",
+                "answer_type": "GENERAL_CHAT",
                 "tool_decision": tool_decision,
                 "quality_review": quality_review,
             },
