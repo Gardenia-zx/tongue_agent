@@ -70,25 +70,14 @@ def _resolve_route_target_from_state(state: AgentState) -> str:
     intent_result = state.get("intent_result") or {}
     route_target = _normalize_route_target(intent_result.get("route_target"))
     query_context = query_context_from_state(state)
-    reference = query_context.get("reference_resolution") or {}
-    target_type = reference.get("target_type")
     route_hint = query_context.get("route_hint")
     has_report_context = bool(active_report_from_state(state))
 
-    if route_target in {"high_risk_safety_subgraph", "privacy_request_subgraph"}:
-        return route_target
-
-    if target_type == "REPORT" and has_report_context:
-        return REPORT_FOLLOWUP_ROUTE
-
-    if target_type == "HEALTH_QA":
-        return "health_qa_subgraph"
-
-    if target_type == "GENERAL_CHAT":
+    if query_context.get("clarification_status") == "NEEDS_CLARIFICATION":
         return GENERAL_CHAT_ROUTE
 
-    if target_type == "TONGUE_ANALYSIS":
-        return "tongue_analysis_subgraph"
+    if route_target in {"high_risk_safety_subgraph", "privacy_request_subgraph"}:
+        return route_target
 
     if isinstance(route_hint, str) and route_hint in ROUTE_TO_NODE:
         if route_hint != REPORT_FOLLOWUP_ROUTE or has_report_context:

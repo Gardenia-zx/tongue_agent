@@ -1,4 +1,6 @@
+import json
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from app.agent.nodes.query_rewrite_node import query_rewrite_node
 from app.agent.nodes.route_node import route_node, select_next_route
@@ -101,7 +103,8 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         rewritten = await query_rewrite_node(state)
         routed = await route_node(rewritten)
 
-        self.assertEqual("REPORT", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("ACTIVE_REPORT", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("report_followup_subgraph", rewritten["query_context"]["route_hint"])
         self.assertIn("当前活动舌象报告", rewritten["query_context"]["standalone_query"])
         self.assertEqual("report_followup_node", select_next_route(rewritten))
         self.assertEqual("report_followup_subgraph", routed["next_action"]["payload"]["route_target"])
@@ -122,7 +125,8 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         rewritten = await query_rewrite_node(state)
         routed = await route_node(rewritten)
 
-        self.assertEqual("HEALTH_QA", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("LAST_ANSWER", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("health_qa_subgraph", rewritten["query_context"]["route_hint"])
         self.assertIn("上一轮健康问答", rewritten["query_context"]["standalone_query"])
         self.assertEqual("health_qa_node", select_next_route(rewritten))
         self.assertEqual("health_qa_subgraph", routed["next_action"]["payload"]["route_target"])
@@ -143,7 +147,8 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         rewritten = await query_rewrite_node(state)
         routed = await route_node(rewritten)
 
-        self.assertEqual("HEALTH_QA", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("LAST_ANSWER", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("health_qa_subgraph", rewritten["query_context"]["route_hint"])
         self.assertEqual("health_qa_node", select_next_route(rewritten))
         self.assertEqual("health_qa_subgraph", routed["next_action"]["payload"]["route_target"])
 
@@ -163,7 +168,8 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         rewritten = await query_rewrite_node(state)
         routed = await route_node(rewritten)
 
-        self.assertEqual("GENERAL_CHAT", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("LAST_ANSWER", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("general_chat_subgraph", rewritten["query_context"]["route_hint"])
         self.assertEqual("general_chat_node", select_next_route(rewritten))
         self.assertEqual("general_chat_subgraph", routed["next_action"]["payload"]["route_target"])
 
@@ -184,7 +190,7 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         rewritten = await query_rewrite_node(state)
         routed = await route_node(rewritten)
 
-        self.assertEqual("UNKNOWN", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("GENERAL_TOPIC", rewritten["query_context"]["reference_resolution"]["target_type"])
         self.assertEqual("health_qa_node", select_next_route(rewritten))
         self.assertEqual("health_qa_subgraph", routed["next_action"]["payload"]["route_target"])
 
@@ -202,6 +208,148 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("UNKNOWN", rewritten["query_context"]["reference_resolution"]["target_type"])
         self.assertEqual("general_chat_node", select_next_route(rewritten))
         self.assertEqual("general_chat_subgraph", routed["next_action"]["payload"]["route_target"])
+
+    async def test_high_confidence_rule_does_not_call_llm(self) -> None:
+        state = self._state(
+            "解释一下我的舌象报告",
+            active_report=self._active_report(),
+            last_answer=self._assistant(
+                content="本次图片主要识别到白苔。",
+                node_name="tongue_report_node",
+                answer_type="TONGUE_REPORT",
+                route_target="tongue_analysis_subgraph",
+                report_id=6,
+            ),
+        )
+
+        with patch("app.agent.nodes.query_rewrite_node._generate_with_model", AsyncMock()) as mocked_llm:
+            rewritten = await query_rewrite_node(state)
+
+        mocked_llm.assert_not_awaited()
+        self.assertEqual("RULE", rewritten["query_context"]["resolution_strategy"])
+        self.assertEqual("ACTIVE_REPORT", rewritten["query_context"]["reference_resolution"]["target_type"])
+
+    async def test_low_confidence_item_reference_uses_llm_fallback(self) -> None:
+        state = self._state(
+            "第二个再详细点",
+            active_report=self._active_report(),
+            last_answer=self._assistant(
+                content="1. 白苔。2. 睡眠不好。",
+                node_name="tongue_report_node",
+                answer_type="TONGUE_REPORT",
+                route_target="tongue_analysis_subgraph",
+                report_id=6,
+            ),
+        )
+        llm_payload = {
+            "standalone_query": "请详细解释上一轮回答中的第二项：睡眠不好。",
+            "route_hint": "report_followup_subgraph",
+            "rewrite_confidence": 0.9,
+            "reference_resolution": {
+                "status": "RESOLVED",
+                "target_type": "LAST_ANSWER_ITEM",
+                "target_focus": "GENERAL_DETAIL",
+                "is_context_dependent": True,
+                "confidence": 0.9,
+                "target_message_id": 123,
+                "target_report_id": 6,
+                "evidence_sources": ["raw_user_input", "last_final_answer", "active_report_ref"],
+                "reason": "user refers to second item in last answer",
+            },
+        }
+
+        with patch(
+            "app.agent.nodes.query_rewrite_node._generate_with_model",
+            AsyncMock(return_value=json.dumps(llm_payload, ensure_ascii=False)),
+        ) as mocked_llm:
+            rewritten = await query_rewrite_node(state)
+
+        mocked_llm.assert_awaited_once()
+        self.assertEqual("LLM_FALLBACK", rewritten["query_context"]["resolution_strategy"])
+        self.assertEqual("LAST_ANSWER_ITEM", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertEqual("report_followup_subgraph", rewritten["query_context"]["route_hint"])
+
+    async def test_low_confidence_llm_timeout_needs_clarification(self) -> None:
+        state = self._state(
+            "第二个再详细点",
+            last_answer=self._assistant(
+                content="1. 白苔。2. 睡眠不好。",
+                node_name="health_qa_node",
+                answer_type="HEALTH_QA",
+                route_target="health_qa_subgraph",
+            ),
+        )
+
+        with patch(
+            "app.agent.nodes.query_rewrite_node._generate_with_model",
+            AsyncMock(side_effect=TimeoutError("llm timeout")),
+        ):
+            rewritten = await query_rewrite_node(state)
+
+        self.assertEqual("NEEDS_CLARIFICATION", rewritten["query_context"]["clarification_status"])
+        self.assertEqual("AMBIGUOUS", rewritten["query_context"]["reference_resolution"]["target_type"])
+
+    async def test_llm_fallback_rejects_fabricated_message_id(self) -> None:
+        state = self._state(
+            "第二个再详细点",
+            last_answer=self._assistant(
+                content="1. 白苔。2. 睡眠不好。",
+                node_name="health_qa_node",
+                answer_type="HEALTH_QA",
+                route_target="health_qa_subgraph",
+            ),
+        )
+        llm_payload = {
+            "standalone_query": "fabricated",
+            "route_hint": "health_qa_subgraph",
+            "rewrite_confidence": 0.9,
+            "reference_resolution": {
+                "status": "RESOLVED",
+                "target_type": "LAST_ANSWER_ITEM",
+                "target_focus": "GENERAL_DETAIL",
+                "is_context_dependent": True,
+                "confidence": 0.9,
+                "target_message_id": "does-not-exist",
+                "evidence_sources": ["last_final_answer"],
+                "reason": "bad id",
+            },
+        }
+
+        with patch(
+            "app.agent.nodes.query_rewrite_node._generate_with_model",
+            AsyncMock(return_value=json.dumps(llm_payload)),
+        ):
+            rewritten = await query_rewrite_node(state)
+
+        self.assertEqual("NEEDS_CLARIFICATION", rewritten["query_context"]["clarification_status"])
+        self.assertEqual("AMBIGUOUS", rewritten["query_context"]["reference_resolution"]["target_type"])
+
+    async def test_stale_query_context_is_not_reused(self) -> None:
+        state = self._state(
+            "白苔是什么",
+            active_report=self._active_report(),
+        )
+        state["turn_id"] = "turn-new"
+        state["current_turn"] = {
+            "turn_id": "turn-new",
+            "query_rewrite_context": {
+                "turn_id": "turn-new",
+                "context_version": "query_rewrite_context.v1",
+                "raw_user_input": "白苔是什么",
+                "recent_messages": [],
+            },
+            "query_context": {
+                "turn_id": "turn-new",
+                "context_version": "old-context-version",
+                "standalone_query": "stale",
+                "reference_resolution": {"target_type": "ACTIVE_REPORT"},
+            },
+        }
+
+        rewritten = await query_rewrite_node(state)
+
+        self.assertNotEqual("stale", rewritten["query_context"]["standalone_query"])
+        self.assertEqual("query_rewrite_context.v1", rewritten["query_context"]["context_version"])
 
 
 if __name__ == "__main__":

@@ -61,10 +61,9 @@ def _intent_route(state: AgentState) -> str:
     return str(intent_result.get("route_target") or "")
 
 
-def _target_type(state: AgentState) -> str:
+def _route_hint(state: AgentState) -> str:
     query_context = query_context_from_state(state)
-    reference = query_context.get("reference_resolution") or {}
-    return str(reference.get("target_type") or "")
+    return str(query_context.get("route_hint") or "")
 
 
 def _has_report_context(state: AgentState) -> bool:
@@ -118,27 +117,27 @@ def _query_contains_health_terms(state: AgentState) -> bool:
 
 
 def choose_agent_tool(state: AgentState) -> tuple[AgentTool, str]:
-    target_type = _target_type(state)
+    route_hint = _route_hint(state)
     route_target = _intent_route(state)
     has_report = _has_report_context(state)
 
     if _has_tongue_image_input(state):
         return TOOLS[TONGUE_IMAGE_ANALYSIS_TOOL], "tongue_image_input_available"
 
-    if target_type == "TONGUE_ANALYSIS":
-        return TOOLS[TONGUE_IMAGE_ANALYSIS_TOOL], "query_context_target_tongue_analysis"
+    if route_hint == "tongue_analysis_subgraph":
+        return TOOLS[TONGUE_IMAGE_ANALYSIS_TOOL], "query_context_route_tongue_analysis"
 
     if route_target == "tongue_analysis_subgraph":
         return TOOLS[TONGUE_IMAGE_ANALYSIS_TOOL], "intent_route_tongue_analysis"
 
-    if target_type == "REPORT" and has_report:
-        return TOOLS[REPORT_FOLLOWUP_TOOL], "query_context_target_report"
+    if route_hint == "report_followup_subgraph" and has_report:
+        return TOOLS[REPORT_FOLLOWUP_TOOL], "query_context_route_report"
 
-    if target_type == "HEALTH_QA":
-        return TOOLS[HEALTH_QA_TOOL], "query_context_target_health_qa"
+    if route_hint == "health_qa_subgraph":
+        return TOOLS[HEALTH_QA_TOOL], "query_context_route_health_qa"
 
-    if target_type == "GENERAL_CHAT":
-        return TOOLS[GENERAL_CHAT_TOOL], "query_context_target_general_chat"
+    if route_hint == "general_chat_subgraph":
+        return TOOLS[GENERAL_CHAT_TOOL], "query_context_route_general_chat"
 
     if route_target == "report_explanation_subgraph" and has_report:
         return TOOLS[REPORT_FOLLOWUP_TOOL], "intent_route_report_with_active_report"

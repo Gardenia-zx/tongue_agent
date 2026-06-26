@@ -3,6 +3,7 @@ from app.agent.state import AgentState
 
 
 AGENT_LOOP_NODE = "agent_loop_node"
+GENERAL_CHAT_NODE = "general_chat_node"
 SAFETY_NODE = "safety_node"
 PRIVACY_NODE = "privacy_request_node"
 
@@ -31,8 +32,8 @@ def select_agent_gate_next(state: AgentState) -> str:
     route_target = str(intent_result.get("route_target") or "")
     risk_level = str(intent_result.get("risk_level") or "")
     query_context = query_context_from_state(state)
-    reference = query_context.get("reference_resolution") or {}
-    target_type = str(reference.get("target_type") or "")
+    route_hint = str(query_context.get("route_hint") or "")
+    clarification_status = str(query_context.get("clarification_status") or "")
 
     if route_target == "high_risk_safety_subgraph" or risk_level in {"HIGH", "EMERGENCY"}:
         return SAFETY_NODE
@@ -40,7 +41,10 @@ def select_agent_gate_next(state: AgentState) -> str:
     if route_target == "privacy_request_subgraph":
         return PRIVACY_NODE
 
-    if target_type in {"REPORT", "HEALTH_QA", "GENERAL_CHAT", "TONGUE_ANALYSIS"}:
+    if clarification_status == "NEEDS_CLARIFICATION":
+        return GENERAL_CHAT_NODE
+
+    if route_hint:
         return AGENT_LOOP_NODE
 
     if route_target == "tongue_analysis_subgraph":

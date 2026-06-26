@@ -1,20 +1,38 @@
+import json
 import re
 from typing import Any
 
+from pydantic import BaseModel, Field, ValidationError
+
 from app.agent.context_builder import (
-    active_report_from_state,
-    build_prompt_context,
+    build_query_rewrite_context,
+    ensure_current_turn,
     extract_user_text,
-    last_final_answer_from_state,
+    query_rewrite_context_from_state,
+    with_query_context,
 )
 from app.agent.state import AgentState
 
 
-TARGET_REPORT = "REPORT"
-TARGET_HEALTH_QA = "HEALTH_QA"
-TARGET_GENERAL_CHAT = "GENERAL_CHAT"
-TARGET_TONGUE_ANALYSIS = "TONGUE_ANALYSIS"
-TARGET_UNKNOWN = "UNKNOWN"
+REF_LAST_ANSWER = "LAST_ANSWER"
+REF_LAST_ANSWER_ITEM = "LAST_ANSWER_ITEM"
+REF_ACTIVE_REPORT = "ACTIVE_REPORT"
+REF_REPORT_ITEM = "REPORT_ITEM"
+REF_PREVIOUS_TASK = "PREVIOUS_TASK"
+REF_GENERAL_TOPIC = "GENERAL_TOPIC"
+REF_UNKNOWN = "UNKNOWN"
+REF_AMBIGUOUS = "AMBIGUOUS"
+
+REFERENCE_TARGET_TYPES = {
+    REF_LAST_ANSWER,
+    REF_LAST_ANSWER_ITEM,
+    REF_ACTIVE_REPORT,
+    REF_REPORT_ITEM,
+    REF_PREVIOUS_TASK,
+    REF_GENERAL_TOPIC,
+    REF_UNKNOWN,
+    REF_AMBIGUOUS,
+}
 
 FOCUS_DIET_ADVICE = "DIET_ADVICE"
 FOCUS_DETAILED_REPORT = "DETAILED_REPORT"
@@ -22,17 +40,48 @@ FOCUS_GENERAL_DETAIL = "GENERAL_DETAIL"
 FOCUS_FEATURE_EXPLANATION = "FEATURE_EXPLANATION"
 FOCUS_UNKNOWN = "UNKNOWN"
 
-
-ROUTE_HINTS = {
-    TARGET_REPORT: "report_followup_subgraph",
-    TARGET_HEALTH_QA: "health_qa_subgraph",
-    TARGET_GENERAL_CHAT: "general_chat_subgraph",
-    TARGET_TONGUE_ANALYSIS: "tongue_analysis_subgraph",
+ROUTE_REPORT_FOLLOWUP = "report_followup_subgraph"
+ROUTE_HEALTH_QA = "health_qa_subgraph"
+ROUTE_GENERAL_CHAT = "general_chat_subgraph"
+ROUTE_TONGUE_ANALYSIS = "tongue_analysis_subgraph"
+ALLOWED_ROUTE_HINTS = {
+    ROUTE_REPORT_FOLLOWUP,
+    ROUTE_HEALTH_QA,
+    ROUTE_GENERAL_CHAT,
+    ROUTE_TONGUE_ANALYSIS,
+}
+DEFAULT_HIGH_CONFIDENCE_THRESHOLD = 0.85
+EVIDENCE_SOURCES = {
+    "raw_user_input",
+    "recent_messages",
+    "last_final_answer",
+    "conversation_summary",
+    "active_report_ref",
 }
 
-# TODO 提示词重写，不符合要求
+
+class LLMReferenceResolution(BaseModel):
+    status: str = "AMBIGUOUS"
+    target_type: str = REF_AMBIGUOUS
+    target_focus: str = FOCUS_UNKNOWN
+    is_context_dependent: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ""
+    target_message_id: Any = None
+    target_report_id: Any = None
+    evidence_sources: list[str] = Field(default_factory=list)
+
+
+class LLMRewriteOutput(BaseModel):
+    standalone_query: str
+    reference_resolution: LLMReferenceResolution
+    route_hint: str | None = None
+    rewrite_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
 QUERY_REWRITE_SYSTEM_PROMPT = """你是中医舌象健康 Agent 的追问消解器。
-你的职责是把依赖上下文的问题改写为独立问题，并判断它依赖的是报告、健康问答、普通聊天还是舌象分析流程。
+你的职责是把依赖上下文的问题改写为独立问题，并解析用户指代的对象。
+reference_resolution.target_type 只能表示指代对象，例如 LAST_ANSWER、ACTIVE_REPORT、REPORT_ITEM。
+业务路由建议必须单独写入 route_hint，不能混入 target_type。
 本节点不回答用户问题。
 """
 
@@ -67,6 +116,30 @@ def _is_short_followup(text: str) -> bool:
             "这个呢",
             "这个是什么意思",
             "为什么",
+        ],
+    )
+
+
+def _is_context_dependent_input(text: str) -> bool:
+    return _is_short_followup(text) or _contains_any(
+        text,
+        [
+            "这个",
+            "那个",
+            "刚才",
+            "上面",
+            "前面",
+            "上一轮",
+            "第二个",
+            "第一个",
+            "第三个",
+            "继续",
+            "展开",
+            "详细点",
+            "再说说",
+            "它",
+            "这份",
+            "那份",
         ],
     )
 
@@ -207,13 +280,13 @@ def _node_name(last_answer: dict[str, Any] | None) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _last_answer_target(last_answer: dict[str, Any] | None) -> str:
+def _last_answer_route_hint(last_answer: dict[str, Any] | None) -> str | None:
     node_name = _node_name(last_answer)
     answer_type = _answer_type(last_answer)
     route_target = str((last_answer or {}).get("route_target") or "")
 
     if node_name in {"health_qa_node"} or answer_type == "HEALTH_QA" or route_target == "health_qa_subgraph":
-        return TARGET_HEALTH_QA
+        return ROUTE_HEALTH_QA
 
     if (
         node_name in {"tongue_report_node", "report_followup_node"}
@@ -221,21 +294,21 @@ def _last_answer_target(last_answer: dict[str, Any] | None) -> str:
         or route_target in {"tongue_analysis_subgraph", "report_followup_subgraph"}
         or (last_answer or {}).get("report_id")
     ):
-        return TARGET_REPORT
+        return ROUTE_REPORT_FOLLOWUP
 
     if node_name == "tongue_analysis_node":
-        return TARGET_TONGUE_ANALYSIS
+        return ROUTE_TONGUE_ANALYSIS
 
     if node_name == "general_chat_node" or answer_type == "GENERAL_CHAT":
-        return TARGET_GENERAL_CHAT
+        return ROUTE_GENERAL_CHAT
 
-    return TARGET_UNKNOWN
+    return None
 
 
 def _standalone_for_target(
     *,
     raw_text: str,
-    target_type: str,
+    route_hint: str | None,
     target_focus: str,
     last_answer: dict[str, Any] | None,
     active_report: dict[str, Any] | None,
@@ -243,7 +316,7 @@ def _standalone_for_target(
     raw_text = raw_text.strip()
     last_content = str((last_answer or {}).get("content") or "").strip()
 
-    if target_type == TARGET_REPORT:
+    if route_hint == ROUTE_REPORT_FOLLOWUP:
         report_summary = ""
         if active_report:
             report_summary = str(
@@ -264,13 +337,13 @@ def _standalone_for_target(
             return f"请基于当前活动舌象报告详细解释相关舌象特征：{raw_text}。报告上下文：{subject}"
         return f"请基于当前活动舌象报告回答：{raw_text}。报告上下文：{subject}"
 
-    if target_type == TARGET_HEALTH_QA:
+    if route_hint == ROUTE_HEALTH_QA:
         subject = last_content[:500] or "上一轮健康知识问答"
         if target_focus == FOCUS_DIET_ADVICE:
             return f"请基于上一轮健康问答继续详细说明饮食和日常注意事项：{raw_text}。上一轮内容：{subject}"
         return f"请基于上一轮健康问答内容回答：{raw_text}。上一轮内容：{subject}"
 
-    if target_type == TARGET_GENERAL_CHAT:
+    if route_hint == ROUTE_GENERAL_CHAT:
         subject = last_content[:300] or "上一轮普通聊天"
         return f"请基于上一轮普通聊天内容回答：{raw_text}。上一轮内容：{subject}"
 
@@ -278,118 +351,429 @@ def _standalone_for_target(
 
 
 def _resolve_reference(state: AgentState) -> dict[str, Any]:
-    raw_text = extract_user_text(state)
-    last_answer = last_final_answer_from_state(state)
-    active_report = active_report_from_state(state)
-    last_target = _last_answer_target(last_answer)
+    rewrite_context = query_rewrite_context_from_state(state)
+    raw_text = str(rewrite_context.get("raw_user_input") or extract_user_text(state))
+    last_answer_value = rewrite_context.get("last_final_answer")
+    last_answer = last_answer_value if isinstance(last_answer_value, dict) else None
+    active_report_value = rewrite_context.get("active_report_ref")
+    active_report = active_report_value if isinstance(active_report_value, dict) else None
+
+    if _is_context_dependent_input(raw_text) and not last_answer and not active_report:
+        return {
+            "status": "MISSING_CONTEXT",
+            "target_type": REF_UNKNOWN,
+            "target_focus": FOCUS_UNKNOWN,
+            "is_context_dependent": True,
+            "confidence": 0.0,
+            "rule_confidence": 0.0,
+            "route_hint": None,
+            "reason": "context_dependent_input_without_required_short_term_materials",
+            "evidence_sources": ["context_health"],
+        }
+
+    last_route_hint = _last_answer_route_hint(last_answer)
     target_focus = _resolve_focus(raw_text, last_answer)
 
     if _mentions_tongue_analysis_start(raw_text) and not _is_short_followup(raw_text):
         return {
-            "target_type": TARGET_TONGUE_ANALYSIS,
+            "status": "NOT_NEEDED",
+            "target_type": REF_GENERAL_TOPIC,
             "target_focus": FOCUS_UNKNOWN,
             "is_context_dependent": False,
             "confidence": 0.9,
+            "rule_confidence": 0.9,
+            "route_hint": ROUTE_TONGUE_ANALYSIS,
             "reason": "用户明确表达舌象图片分析意图",
+            "evidence_sources": ["raw_user_input"],
         }
 
     if _mentions_report(raw_text) and active_report:
         return {
-            "target_type": TARGET_REPORT,
+            "status": "RESOLVED",
+            "target_type": REF_ACTIVE_REPORT,
             "target_focus": target_focus,
             "is_context_dependent": True,
             "confidence": 0.94,
+            "rule_confidence": 0.94,
+            "route_hint": ROUTE_REPORT_FOLLOWUP,
             "reason": "用户明确提到报告/舌象/图片等报告相关对象",
             "target_report_id": active_report.get("report_id"),
+            "evidence_sources": ["raw_user_input", "active_report_ref"],
         }
 
-    if _is_short_followup(raw_text) and last_target != TARGET_UNKNOWN:
+    if _is_short_followup(raw_text) and last_route_hint:
+        is_item_ref = _contains_any(raw_text, ["第一个", "第二个", "第三个", "这一项", "那一项"])
         return {
-            "target_type": last_target,
+            "status": "RESOLVED",
+            "target_type": REF_LAST_ANSWER_ITEM if is_item_ref else REF_LAST_ANSWER,
             "target_focus": target_focus,
             "is_context_dependent": True,
-            "confidence": 0.86,
+            "confidence": 0.64 if is_item_ref else 0.88,
+            "rule_confidence": 0.64 if is_item_ref else 0.88,
+            "route_hint": last_route_hint,
             "reason": "短追问优先继承上一轮最终回答的上下文对象",
             "target_message_id": (last_answer or {}).get("message_id"),
             "target_report_id": (last_answer or {}).get("report_id"),
+            "evidence_sources": ["raw_user_input", "last_final_answer"],
         }
 
-    if _mentions_health_qa_followup(raw_text) and last_target == TARGET_HEALTH_QA:
+    if _mentions_health_qa_followup(raw_text) and last_route_hint == ROUTE_HEALTH_QA:
         return {
-            "target_type": TARGET_HEALTH_QA,
+            "status": "RESOLVED",
+            "target_type": REF_LAST_ANSWER,
             "target_focus": target_focus,
             "is_context_dependent": True,
-            "confidence": 0.82,
+            "confidence": 0.88,
+            "rule_confidence": 0.88,
+            "route_hint": ROUTE_HEALTH_QA,
             "reason": "用户追问饮食/建议等内容，上一轮是健康问答",
             "target_message_id": (last_answer or {}).get("message_id"),
+            "evidence_sources": ["raw_user_input", "last_final_answer"],
         }
 
-    if _mentions_health_qa_followup(raw_text) and last_target == TARGET_REPORT and active_report:
+    if _mentions_health_qa_followup(raw_text) and last_route_hint == ROUTE_REPORT_FOLLOWUP and active_report:
         return {
-            "target_type": TARGET_REPORT,
+            "status": "RESOLVED",
+            "target_type": REF_ACTIVE_REPORT,
             "target_focus": target_focus,
             "is_context_dependent": True,
-            "confidence": 0.82,
+            "confidence": 0.88,
+            "rule_confidence": 0.88,
+            "route_hint": ROUTE_REPORT_FOLLOWUP,
             "reason": "用户追问建议类内容，上一轮和活动报告均指向报告",
             "target_message_id": (last_answer or {}).get("message_id"),
             "target_report_id": active_report.get("report_id"),
+            "evidence_sources": ["raw_user_input", "last_final_answer", "active_report_ref"],
         }
 
     return {
-        "target_type": TARGET_UNKNOWN,
+        "status": "NOT_NEEDED",
+        "target_type": REF_GENERAL_TOPIC,
         "target_focus": target_focus,
         "is_context_dependent": False,
-        "confidence": 0.0,
+        "confidence": 1.0,
+        "rule_confidence": 1.0,
+        "route_hint": None,
         "reason": "未发现明确上下文依赖对象",
+        "evidence_sources": [],
     }
 
 
-async def query_rewrite_node(state: AgentState) -> AgentState:
-    # 构造提示词，用户查询重写
-    prompt_context = build_prompt_context(
-        state,
-        mode="MINIMAL_PRE_INTENT",
-        system_prompt=QUERY_REWRITE_SYSTEM_PROMPT,
-        node_name="query_rewrite_node",
-        include_long_term_memory=False,
+def _high_confidence_threshold(state: AgentState) -> float:
+    options = state.get("options") or {}
+    query_rewrite_options = options.get("query_rewrite") if isinstance(options, dict) else {}
+    if isinstance(query_rewrite_options, dict):
+        try:
+            value = float(query_rewrite_options.get("high_confidence_threshold"))
+        except (TypeError, ValueError):
+            value = DEFAULT_HIGH_CONFIDENCE_THRESHOLD
+        return min(1.0, max(0.0, value))
+    return DEFAULT_HIGH_CONFIDENCE_THRESHOLD
+
+
+def _available_message_ids(rewrite_context: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for item in rewrite_context.get("recent_messages") or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("message_id", "external_message_id"):
+            value = item.get(key)
+            if value is not None:
+                ids.add(str(value))
+    last_answer = rewrite_context.get("last_final_answer")
+    if isinstance(last_answer, dict):
+        for key in ("message_id", "external_message_id"):
+            value = last_answer.get(key)
+            if value is not None:
+                ids.add(str(value))
+    return ids
+
+
+def _active_report_id(rewrite_context: dict[str, Any]) -> str | None:
+    active_report = rewrite_context.get("active_report_ref")
+    if not isinstance(active_report, dict):
+        return None
+    report_id = active_report.get("report_id") or active_report.get("id")
+    return str(report_id) if report_id is not None else None
+
+
+def _ambiguous_reference(reason: str) -> dict[str, Any]:
+    return {
+        "status": "AMBIGUOUS",
+        "target_type": REF_AMBIGUOUS,
+        "target_focus": FOCUS_UNKNOWN,
+        "is_context_dependent": True,
+        "confidence": 0.0,
+        "reason": reason,
+        "evidence_sources": [],
+    }
+
+
+def _validate_llm_output(
+    value: dict[str, Any],
+    *,
+    rewrite_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    try:
+        output = LLMRewriteOutput.model_validate(value)
+    except ValidationError:
+        return None
+
+    reference = output.reference_resolution.model_dump(mode="json", exclude_none=True)
+    if reference.get("target_type") not in REFERENCE_TARGET_TYPES:
+        return None
+    if output.route_hint is not None and output.route_hint not in ALLOWED_ROUTE_HINTS:
+        return None
+
+    evidence_sources = reference.get("evidence_sources") or []
+    if any(source not in EVIDENCE_SOURCES for source in evidence_sources):
+        return None
+
+    target_message_id = reference.get("target_message_id")
+    if target_message_id is not None and str(target_message_id) not in _available_message_ids(rewrite_context):
+        return None
+
+    target_report_id = reference.get("target_report_id")
+    trusted_report_id = _active_report_id(rewrite_context)
+    if target_report_id is not None and str(target_report_id) != trusted_report_id:
+        return None
+
+    reference["confidence"] = min(
+        float(reference.get("confidence") or 0.0),
+        float(output.rewrite_confidence or 0.0),
     )
-    # 提取用户文本消息
-    raw_text = extract_user_text(state)
-    # 提取上一轮答案
-    last_answer = prompt_context.get("last_final_answer")
-    # 提取会话讨论报告
-    active_report = prompt_context.get("active_report")
+    return {
+        "standalone_query": output.standalone_query.strip(),
+        "reference_resolution": reference,
+        "route_hint": output.route_hint,
+        "rewrite_confidence": float(output.rewrite_confidence or 0.0),
+    }
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    text = text.strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"```$", "", text).strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            value = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def _llm_prompt_payload(
+    *,
+    raw_text: str,
+    rule_reference: dict[str, Any],
+    rewrite_context: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "task": "rewrite_context_dependent_query",
+        "raw_user_input": raw_text,
+        "rule_candidate": rule_reference,
+        "allowed_reference_target_types": sorted(REFERENCE_TARGET_TYPES),
+        "allowed_route_hints": sorted(ALLOWED_ROUTE_HINTS),
+        "allowed_evidence_sources": sorted(EVIDENCE_SOURCES),
+        "context": {
+            "recent_messages": rewrite_context.get("recent_messages") or [],
+            "last_final_answer": rewrite_context.get("last_final_answer"),
+            "conversation_summary": rewrite_context.get("conversation_summary"),
+            "active_report_ref": rewrite_context.get("active_report_ref"),
+            "context_health": rewrite_context.get("context_health") or {},
+        },
+        "output_schema": {
+            "standalone_query": "string",
+            "route_hint": "one allowed_route_hints or null",
+            "rewrite_confidence": "0..1",
+            "reference_resolution": {
+                "status": "RESOLVED | AMBIGUOUS | NOT_NEEDED",
+                "target_type": "one allowed_reference_target_types",
+                "target_focus": "string",
+                "is_context_dependent": "boolean",
+                "confidence": "0..1",
+                "target_message_id": "existing message id or null",
+                "target_report_id": "trusted active report id or null",
+                "evidence_sources": "allowed evidence source names only",
+                "reason": "short string",
+            },
+        },
+    }
+
+
+async def _generate_with_model(messages: list[dict[str, Any]]) -> str:
+    from app.core.config import get_settings
+    from app.integrations.model_gateway import get_chat_model_client
+
+    settings = get_settings()
+    return await get_chat_model_client().generate(
+        messages=messages,
+        temperature=0.0,
+        max_tokens=min(settings.chat_model_max_tokens, 800),
+    )
+
+
+async def _llm_fallback(
+    *,
+    raw_text: str,
+    rule_reference: dict[str, Any],
+    rewrite_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    messages = [
+        {
+            "role": "system",
+            "content": QUERY_REWRITE_SYSTEM_PROMPT + "\n只返回一个 JSON 对象。",
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                _llm_prompt_payload(
+                    raw_text=raw_text,
+                    rule_reference=rule_reference,
+                    rewrite_context=rewrite_context,
+                ),
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    try:
+        raw = await _generate_with_model(messages)
+    except Exception:
+        return None
+    payload = _extract_json_object(raw)
+    if payload is None:
+        return None
+    return _validate_llm_output(payload, rewrite_context=rewrite_context)
+
+
+def _query_context_still_current(
+    *,
+    current_turn: dict[str, Any],
+    query_context: dict[str, Any],
+) -> bool:
+    rewrite_context = current_turn.get("query_rewrite_context") or {}
+    return (
+        query_context.get("turn_id") == current_turn.get("turn_id")
+        and query_context.get("context_version") == rewrite_context.get("context_version")
+    )
+
+
+async def query_rewrite_node(state: AgentState) -> AgentState:
+    current_turn = ensure_current_turn(state)
+    existing_query_context = current_turn.get("query_context")
+    if (
+        isinstance(existing_query_context, dict)
+        and existing_query_context
+        and _query_context_still_current(
+            current_turn=current_turn,
+            query_context=existing_query_context,
+        )
+    ):
+        return {
+            **state,
+            "current_turn": current_turn,
+            "current_node": "query_rewrite_node",
+            "query_context": existing_query_context,
+            "prompt_context": current_turn.get("query_rewrite_context") or {},
+        }
+
+    rewrite_context = query_rewrite_context_from_state(
+        {**state, "current_turn": current_turn}
+    )
+    if (
+        rewrite_context.get("turn_id") != current_turn.get("turn_id")
+        or not rewrite_context.get("context_version")
+    ):
+        rewrite_context = build_query_rewrite_context({**state, "current_turn": current_turn})
+        current_turn["query_rewrite_context"] = rewrite_context
+        current_turn["context_health"] = rewrite_context.get("context_health") or {}
+    elif not current_turn.get("query_rewrite_context"):
+        current_turn["query_rewrite_context"] = rewrite_context
+        current_turn["context_health"] = rewrite_context.get("context_health") or {}
+    state = {**state, "current_turn": current_turn}
+
+    raw_text = str(rewrite_context.get("raw_user_input") or extract_user_text(state))
+    last_answer = rewrite_context.get("last_final_answer")
+    active_report = rewrite_context.get("active_report_ref")
     # 指代消解
-    reference = _resolve_reference(state)
+    threshold = _high_confidence_threshold(state)
+    rule_reference = _resolve_reference(state)
+    reference = rule_reference
     # 提取结果中的目标类型
-    target_type = reference.get("target_type") or TARGET_UNKNOWN
+    route_hint = reference.get("route_hint")
     # 提取指代焦点
     target_focus = str(reference.get("target_focus") or FOCUS_UNKNOWN)
-    # 生成可以独立理解的问题，不依赖上下文
-    standalone_query = _standalone_for_target(
-        raw_text=raw_text,
-        target_type=target_type,
-        target_focus=target_focus,
-        last_answer=last_answer if isinstance(last_answer, dict) else None,
-        active_report=active_report if isinstance(active_report, dict) else None,
+    clarification_status = (
+        "NEEDS_CLARIFICATION"
+        if reference.get("status") == "MISSING_CONTEXT"
+        else "NOT_NEEDED"
     )
+    llm_result: dict[str, Any] | None = None
+    if clarification_status != "NEEDS_CLARIFICATION" and float(reference.get("rule_confidence") or 0.0) < threshold:
+        llm_result = await _llm_fallback(
+            raw_text=raw_text,
+            rule_reference=rule_reference,
+            rewrite_context=rewrite_context,
+        )
+        if llm_result is None:
+            clarification_status = "NEEDS_CLARIFICATION"
+            reference = _ambiguous_reference("low_confidence_rule_and_llm_fallback_failed")
+            route_hint = None
+        else:
+            reference = llm_result["reference_resolution"]
+            target_focus = str(reference.get("target_focus") or FOCUS_UNKNOWN)
+            route_hint = llm_result.get("route_hint")
+    # 生成可以独立理解的问题，不依赖上下文
+    if clarification_status == "NEEDS_CLARIFICATION":
+        standalone_query = raw_text
+    elif llm_result is not None:
+        standalone_query = llm_result["standalone_query"] or raw_text
+    else:
+        standalone_query = _standalone_for_target(
+            raw_text=raw_text,
+            route_hint=route_hint if isinstance(route_hint, str) else None,
+            target_focus=target_focus,
+            last_answer=last_answer if isinstance(last_answer, dict) else None,
+            active_report=active_report if isinstance(active_report, dict) else None,
+        )
     # 路由建议
-    route_hint = ROUTE_HINTS.get(str(target_type))
 
 
     # 重写后的查询字典
     query_context = {
         "schema_version": "1.0",
+        "turn_id": current_turn.get("turn_id"),
+        "context_version": rewrite_context.get("context_version"),
         "raw_user_input": raw_text,
         "standalone_query": standalone_query,
         "reference_resolution": reference,
-        "route_hint": route_hint,
-        "prompt_context": prompt_context,
+        "clarification_status": clarification_status,
+        "route_hint": route_hint if route_hint in ALLOWED_ROUTE_HINTS else None,
+        "rewrite_confidence": float(reference.get("confidence") or 0.0),
+        "rule_confidence": float(rule_reference.get("rule_confidence") or 0.0),
+        "resolution_strategy": (
+            "CLARIFICATION"
+            if clarification_status == "NEEDS_CLARIFICATION"
+            else "RULE"
+            if float(rule_reference.get("rule_confidence") or 0.0) >= threshold
+            else "LLM_FALLBACK"
+        ),
+        "high_confidence_threshold": threshold,
+        "prompt_context": rewrite_context,
     }
+    next_state = with_query_context(state, query_context)
 
     return {
-        **state,
+        **next_state,
         "current_node": "query_rewrite_node",
-        "query_context": query_context,
-        "prompt_context": prompt_context,
+        "prompt_context": rewrite_context,
     }

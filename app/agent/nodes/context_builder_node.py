@@ -1,24 +1,19 @@
-from app.agent.context_builder import build_prompt_context
+from app.agent.context_builder import with_query_rewrite_context
 from app.agent.state import AgentState
 
 
-PRE_INTENT_SYSTEM_PROMPT = """你是中医舌象健康 Agent 的上下文构建器。
-本阶段只为追问消解和意图识别准备最小上下文，不回答用户问题。
-上下文必须优先使用最近完整对话、上一轮最终回答、历史摘要和当前活动报告。
-不得用长期记忆伪造上一轮对话或报告内容。
+PRE_INTENT_SYSTEM_PROMPT = """You are the pre-intent context material builder.
+Only prepare trusted short-term materials for query rewrite and intent routing.
+Do not resolve references, do not create standalone_query, and do not read long-term memory.
 """
 
 
-async def context_builder_node(state: AgentState) -> AgentState:
-    prompt_context = build_prompt_context(
-        state,
-        mode="MINIMAL_PRE_INTENT",
-        system_prompt=PRE_INTENT_SYSTEM_PROMPT,
-        node_name="context_builder_node",
-        include_long_term_memory=False,
-    )
+async def query_rewrite_context_builder_node(state: AgentState) -> AgentState:
+    next_state = with_query_rewrite_context(state)
     return {
-        **state,
-        "current_node": "context_builder_node",
-        "prompt_context": prompt_context,
+        **next_state,
+        "current_node": "query_rewrite_context_builder",
     }
+
+
+context_builder_node = query_rewrite_context_builder_node
