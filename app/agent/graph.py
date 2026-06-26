@@ -15,13 +15,20 @@ from app.agent.runtime import build_agent_runtime_subgraph
 from app.agent.state import AgentState
 
 
+AGENT_RUNTIME_RECURSION_LIMIT = 64
+
+
 def build_agent_graph():
     graph = StateGraph(AgentState)
 
     # Compile the child graph without a checkpointer. The parent graph supplies its
     # persistence implementation when compile_agent_graph() is called, allowing
     # planner/tool/budget steps inside the runtime to participate in checkpointing.
-    agent_runtime_subgraph = build_agent_runtime_subgraph().compile()
+    # A child-specific recursion limit protects legitimate multi-step tool plans
+    # from LangGraph's lower default while the runtime's own budgets prevent loops.
+    agent_runtime_subgraph = build_agent_runtime_subgraph().compile().with_config(
+        {"recursion_limit": AGENT_RUNTIME_RECURSION_LIMIT}
+    )
 
     graph.add_node("memory_read_node", memory_read_node)
     graph.add_node("memory_recall_node", memory_recall_node)
