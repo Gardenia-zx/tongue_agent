@@ -2,7 +2,7 @@ import json
 import re
 from typing import Any
 
-from app.agent.context_builder import effective_user_query, with_prompt_context
+from app.agent.context_builder import effective_user_query, query_context_from_state, with_prompt_context
 from app.agent.state import AgentState
 from app.core.config import get_settings
 from app.integrations.model_gateway import ModelGatewayError, get_chat_model_client
@@ -335,6 +335,39 @@ async def general_chat_node(state: AgentState) -> AgentState:
         node_name="general_chat_node",
         include_long_term_memory=True,
     )
+    query_context = query_context_from_state(state)
+    if query_context.get("clarification_status") == "NEEDS_CLARIFICATION":
+        return {
+            **state,
+            "current_node": "general_chat_node",
+            "tool_decision": {
+                "need_rag": False,
+                "need_web_search": False,
+                "need_tongue_analysis": False,
+                "suggested_next_node": "general_chat_node",
+                "reason": "missing_short_term_context_requires_clarification",
+            },
+            "quality_review": {
+                "answerable_without_tool": False,
+                "needs_user_choice": True,
+                "risk_note": "LOW",
+            },
+            "response_message": {
+                "role": "assistant",
+                "content_type": "text",
+                "content": "我需要先确认一下你指的是哪一段内容。你可以把想继续追问的那句话、报告项或上一轮回答再贴一下，我再接着展开。",
+            },
+            "next_action": {
+                "type": "RESPOND_TO_USER",
+                "payload": {
+                    "status": "CLARIFY",
+                    "route_target": "general_chat_subgraph",
+                    "answer_type": "CLARIFICATION",
+                    "clarification_status": "NEEDS_CLARIFICATION",
+                    "reference_resolution": query_context.get("reference_resolution") or {},
+                },
+            },
+        }
     settings = get_settings()
     user_text = _extract_user_text(state)
     standalone_query = effective_user_query(state) or user_text

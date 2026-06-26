@@ -79,7 +79,7 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("report_followup_node", select_next_route(rewritten))
         self.assertEqual(
-            "REPORT",
+            "ACTIVE_REPORT",
             rewritten["query_context"]["reference_resolution"]["target_type"],
         )
         self.assertEqual(
@@ -153,7 +153,7 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("report_followup_node", select_next_route(rewritten))
         self.assertEqual(
-            "REPORT",
+            "ACTIVE_REPORT",
             rewritten["query_context"]["reference_resolution"]["target_type"],
         )
         self.assertEqual(

@@ -49,6 +49,8 @@ class AgentState(TypedDict, total=False):
     prompt_context: dict[str, Any]
     # 查询改写和 RAG 检索使用的上下文，例如原始问题、补全后的查询、引用对象。
     query_context: dict[str, Any]
+    # 当前 Turn 的临时上下文，按 turn_id 隔离，避免读取上一轮解析结果。
+    current_turn: dict[str, Any]
     # 本次请求的运行选项，例如 memory.can_read、memory.can_write、debug 开关等。
     options: dict[str, Any]
 
