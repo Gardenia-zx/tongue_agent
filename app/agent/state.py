@@ -51,6 +51,12 @@ class AgentState(TypedDict, total=False):
     query_context: dict[str, Any]
     # 当前 Turn 的临时上下文，按 turn_id 隔离，避免读取上一轮解析结果。
     current_turn: dict[str, Any]
+    # Turn 生命周期守卫，记录状态清理、响应归属校验和修复结果。
+    turn_guard: dict[str, Any]
+    # Runtime 上下文披露策略，决定是否允许加载报告和历史对话。
+    context_policy: dict[str, Any]
+    # Runtime 和领域节点共享的业务上下文。
+    business_context: dict[str, Any]
     # 本次请求的运行选项，例如 memory.can_read、memory.can_write、debug 开关等。
     options: dict[str, Any]
 
@@ -88,6 +94,10 @@ class AgentState(TypedDict, total=False):
     next_action: dict[str, Any]
     # 返回给用户的消息体，通常包含 role、content_type、content。
     response_message: dict[str, Any]
+    # 工具选择节点的结构化决策结果。
+    tool_decision: dict[str, Any]
+    # 回答质量与安全复核结果。
+    quality_review: dict[str, Any]
 
     # 版本信息，例如模型版本、RAG 索引版本、Prompt 版本、报告 Schema 版本。
     versions: dict[str, Any]
