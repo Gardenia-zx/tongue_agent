@@ -69,8 +69,19 @@ def _merge_next_action_compat(
     }
 
 
-_original_execute_tool_call = legacy_agent_loop._execute_tool_call
-_original_state_from_final_answer = legacy_agent_loop._state_from_final_answer
+# Preserve true legacy implementations across importlib.reload or test reloads.
+_original_execute_tool_call = getattr(
+    legacy_agent_loop,
+    "_runtime_original_execute_tool_call",
+    legacy_agent_loop._execute_tool_call,
+)
+_original_state_from_final_answer = getattr(
+    legacy_agent_loop,
+    "_runtime_original_state_from_final_answer",
+    legacy_agent_loop._state_from_final_answer,
+)
+legacy_agent_loop._runtime_original_execute_tool_call = _original_execute_tool_call
+legacy_agent_loop._runtime_original_state_from_final_answer = _original_state_from_final_answer
 
 
 async def _execute_tool_call_guarded(
