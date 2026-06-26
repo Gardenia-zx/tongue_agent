@@ -1,7 +1,6 @@
 from langgraph.graph import END, StateGraph
 
 from app.agent.nodes.agent_gate_node import agent_gate_node, select_agent_gate_next
-from app.agent.nodes.agent_loop_node import agent_loop_node
 from app.agent.nodes.context_builder_node import context_builder_node
 from app.agent.nodes.final_context_builder_node import final_context_builder_node
 from app.agent.nodes.general_chat_node import general_chat_node
@@ -12,11 +11,17 @@ from app.agent.nodes.privacy_request_node import privacy_request_node
 from app.agent.nodes.query_rewrite_node import query_rewrite_node
 from app.agent.nodes.report_followup_node import report_followup_node
 from app.agent.nodes.safety_node import safety_node
+from app.agent.runtime import build_agent_runtime_subgraph
 from app.agent.state import AgentState
 
 
 def build_agent_graph():
     graph = StateGraph(AgentState)
+
+    # Compile the child graph without a checkpointer. The parent graph supplies its
+    # persistence implementation when compile_agent_graph() is called, allowing
+    # planner/tool/budget steps inside the runtime to participate in checkpointing.
+    agent_runtime_subgraph = build_agent_runtime_subgraph().compile()
 
     graph.add_node("memory_read_node", memory_read_node)
     graph.add_node("memory_recall_node", memory_recall_node)
@@ -26,7 +31,7 @@ def build_agent_graph():
     graph.add_node("intent_node", intent_node)
     graph.add_node("agent_gate_node", agent_gate_node)
     graph.add_node("final_context_builder_node", final_context_builder_node)
-    graph.add_node("agent_loop_node", agent_loop_node)
+    graph.add_node("agent_runtime_subgraph", agent_runtime_subgraph)
     graph.add_node("general_chat_node", general_chat_node)
     graph.add_node("health_qa_node", health_qa_node)
     graph.add_node("privacy_request_node", privacy_request_node)
@@ -45,13 +50,15 @@ def build_agent_graph():
             "privacy_request_node": "privacy_request_node",
             "safety_node": "safety_node",
             "general_chat_node": "general_chat_node",
+            # Keep the existing selector contract. The selected agent-loop route
+            # now enters memory recall and then the checkpointable runtime subgraph.
             "agent_loop_node": "memory_recall_node",
         },
     )
 
     graph.add_edge("memory_recall_node", "final_context_builder_node")
-    graph.add_edge("final_context_builder_node", "agent_loop_node")
-    graph.add_edge("agent_loop_node", "memory_commit_node")
+    graph.add_edge("final_context_builder_node", "agent_runtime_subgraph")
+    graph.add_edge("agent_runtime_subgraph", "memory_commit_node")
     graph.add_edge("general_chat_node", "memory_commit_node")
     graph.add_edge("health_qa_node", "memory_commit_node")
     graph.add_edge("report_followup_node", "memory_commit_node")
