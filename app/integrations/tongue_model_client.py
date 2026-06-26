@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import mimetypes
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -8,6 +10,9 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.config import get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 SUPPORTED_IMAGE_CONTENT_TYPES = {
@@ -117,6 +122,7 @@ class TongueModelClient:
         }
 
         try:
+            started_at = time.perf_counter()
             async with self.semaphore:
                 async with httpx.AsyncClient(
                     timeout=self.timeout_seconds,
@@ -128,7 +134,20 @@ class TongueModelClient:
                         files=files,
                     )
         except httpx.HTTPError as exc:
+            elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.warning(
+                "Tongue model request failed after %sms: %s",
+                elapsed_ms,
+                exc,
+            )
             raise TongueModelError(f"Tongue model request failed: {exc}") from exc
+
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "Tongue model request completed in %sms with status %s",
+            elapsed_ms,
+            response.status_code,
+        )
 
         if response.status_code >= 400:
             raise TongueModelError(

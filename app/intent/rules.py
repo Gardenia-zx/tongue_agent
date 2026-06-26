@@ -59,14 +59,20 @@ EMERGENCY_PATTERNS = [
 ]
 
 PRESCRIPTION_PATTERNS = [
-    r"吃什么药",
+    r"吃什么.*?药",
     r"用什么药",
     r"开什么药",
     r"开.*?方",
     r"处方",
     r"药量|剂量",
     r"停药|换药|加药|减药",
+    r"药.*?(停|换|加|减|换掉|换一种|换成)",
+    r"药.*?(一天|每次|一次).*?(吃|服).*?(几|多少|\d+).*?(片|粒|颗|袋|毫克|mg)",
+    r"(一天|每次|一次).*?(吃|服).*?(几|多少|\d+).*?(片|粒|颗|袋|毫克|mg).*?药",
     r"治疗方案",
+    r"诊断",
+    r"判断.*?是不是.*?病",
+    r"是不是.*?病",
 ]
 
 GENERAL_CHAT_PATTERNS = [
@@ -82,6 +88,13 @@ TONGUE_ANALYSIS_PATTERNS = [
     r"(舌象|舌头|舌苔).*?(分析|看看|看一下|看下|上传|照片|图片|拍|测|报告)",
     r"(分析|看看|看一下|看下|上传|拍|测).*?(舌象|舌头|舌苔|舌象照片)",
     r"舌象健康报告",
+]
+
+REPORT_FOLLOWUP_PATTERNS = [
+    r"(前面|刚才|上面|上次|上一份|最近).*?(报告|舌象分析|分析).*?(不够详细|太简单|详细|具体|展开|补充)",
+    r"(我的|这份|这个|刚才|前面|上面|上次).*?(舌象分析|报告|分析).*?(详细|具体|展开|补充|再说)",
+    r"(舌象分析|报告|分析).*?(不够详细|太简单|详细一点|详细点|具体一点|具体点|展开说)",
+    r"(讲|说|回答|分析).*?(详细一点|详细点|具体一点|具体点|展开说说)",
 ]
 
 TONGUE_CONTINUE_PATTERNS = [
@@ -172,6 +185,17 @@ def match_business_intent(
             risk_level=RiskLevel.LOW,
             confidence=0.95,
             matched_rule="hard_rule_general_chat",
+        )
+
+    report_followup_pattern = _first_pattern_match(text, REPORT_FOLLOWUP_PATTERNS)
+    if report_followup_pattern:
+        return RuleIntentMatch(
+            intent_code="REPORT_EXPLANATION",
+            route_target=GENERAL_CHAT_ROUTE,
+            risk_level=RiskLevel.LOW,
+            confidence=0.96,
+            matched_rule="hard_rule_report_followup",
+            matched_texts=[report_followup_pattern],
         )
 
     if _first_pattern_match(text, TONGUE_CONTINUE_PATTERNS):

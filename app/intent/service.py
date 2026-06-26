@@ -115,6 +115,7 @@ class IntentRecognitionService:
             scored_hits=scored_hits,
             domain_result=domain_result,
         )
+        ranked_candidates = self._remove_es_only_safety_candidates(ranked_candidates)
 
         if not ranked_candidates:
             return self._general_chat_result(
@@ -255,6 +256,17 @@ class IntentRecognitionService:
 
         candidates.sort(key=lambda item: item.final_score, reverse=True)
         return candidates
+
+    @classmethod
+    def _remove_es_only_safety_candidates(
+        cls,
+        candidates: list[AggregatedIntent],
+    ) -> list[AggregatedIntent]:
+        return [
+            candidate
+            for candidate in candidates
+            if cls._risk_level_for(candidate.hit) not in {RiskLevel.HIGH, RiskLevel.EMERGENCY}
+        ]
 
     @staticmethod
     def _domain_bonus_for_intent(

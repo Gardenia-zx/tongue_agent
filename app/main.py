@@ -10,6 +10,10 @@ from app.api.routes_health import router as health_router
 from app.core.config import get_settings
 from app.core.event_loop import configure_asyncio_event_loop_policy
 from app.integrations.langgraph_persistence import open_langgraph_persistence
+from app.integrations.turn_records import (
+    create_turn_record_engine,
+    create_turn_record_store,
+)
 
 
 configure_asyncio_event_loop_policy()
@@ -21,14 +25,22 @@ class UTF8ORJSONResponse(ORJSONResponse):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    async with open_langgraph_persistence() as persistence:
-        app.state.agent_checkpointer = persistence.checkpointer
-        app.state.agent_store = persistence.store
-        app.state.agent_graph = compile_agent_graph(
-            checkpointer=persistence.checkpointer,
-            store=persistence.store,
-        )
-        yield
+    turn_record_engine = create_turn_record_engine()
+    turn_record_store = create_turn_record_store(turn_record_engine)
+    await turn_record_store.setup()
+    app.state.agent_turn_record_store = turn_record_store
+
+    try:
+        async with open_langgraph_persistence() as persistence:
+            app.state.agent_checkpointer = persistence.checkpointer
+            app.state.agent_store = persistence.store
+            app.state.agent_graph = compile_agent_graph(
+                checkpointer=persistence.checkpointer,
+                store=persistence.store,
+            )
+            yield
+    finally:
+        await turn_record_engine.dispose()
 
 
 def create_app() -> FastAPI:

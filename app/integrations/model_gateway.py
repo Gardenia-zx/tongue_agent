@@ -106,20 +106,26 @@ class ChatModelClient:
         self.timeout_seconds = timeout_seconds
         self.semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def generate(
+    async def chat(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         temperature: float,
         max_tokens: int,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice or "auto"
 
         if extra_body:
             payload.update(extra_body)
@@ -150,6 +156,25 @@ class ChatModelClient:
             raise ModelGatewayError("Chat model returned empty choices")
 
         message = choices[0].get("message") or {}
+        if not isinstance(message, dict):
+            raise ModelGatewayError("Chat model returned invalid message")
+
+        return message
+
+    async def generate(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        extra_body: dict[str, Any] | None = None,
+    ) -> str:
+        message = await self.chat(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+        )
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             raise ModelGatewayError("Chat model returned empty content")

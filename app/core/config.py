@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     model_gateway_base_url: str = "http://localhost:9000"
     model_gateway_api_key: str | None = None
-    model_gateway_timeout_seconds: int = 30
+    model_gateway_timeout_seconds: int = Field(default=90, ge=1, le=600)
     chat_model_name: str = "qwen2.5-7b-instruct"
     chat_model_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     chat_model_max_tokens: int = Field(default=800, ge=64, le=4096)
@@ -36,12 +36,16 @@ class Settings(BaseSettings):
     tongue_model_base_url: str = "http://127.0.0.1:9100"
     tongue_model_api_key: str | None = None
     tongue_model_bearer_token: str | None = None
-    tongue_model_timeout_seconds: int = Field(default=30, ge=1, le=180)
+    tongue_model_timeout_seconds: int = Field(default=120, ge=1, le=600)
     tongue_model_max_concurrency: int = Field(default=2, ge=1, le=16)
     tongue_model_max_image_size_mb: int = Field(default=10, ge=1, le=50)
 
     agent_lock_ttl_seconds: int = Field(default=120, ge=10, le=600)
     idempotency_ttl_seconds: int = Field(default=86400, ge=60)
+    agent_turn_lease_seconds: int = Field(default=300, ge=30, le=1800)
+    agent_turn_record_encryption_key: str | None = None
+    agent_unacked_warn_after_seconds: int = Field(default=900, ge=60)
+    agent_unacked_reconcile_after_seconds: int = Field(default=86400, ge=3600)
 
     intent_top_k: int = Field(default=5, ge=1, le=20)
     intent_route_threshold: float = Field(default=0.75, ge=0.0, le=1.0)

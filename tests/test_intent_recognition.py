@@ -10,7 +10,10 @@ from app.integrations.es_client import create_es_client
 from app.integrations.model_gateway import get_embedding_model
 from app.intent.domain_terms import DomainTermNormalizer
 from app.intent.es_intent_retriever import ESIntentRetriever
-from app.intent.service import IntentRecognitionService
+from app.intent.es_intent_retriever import RawIntentHit
+from app.intent.rules import match_safety_intent
+from app.intent.service import AggregatedIntent, IntentRecognitionService
+from app.intent.similarity import IntentScore
 from app.schemas.intent import IntentDecision, RiskLevel
 
 
@@ -104,6 +107,18 @@ class TestIntentRecognition(unittest.IsolatedAsyncioTestCase):
                 "帮我解释这份舌象报告",
                 "REPORT_EXPLANATION",
                 "report_explanation_subgraph",
+                min_confidence=0.9,
+            ),
+            IntentCase(
+                "讲详细一点",
+                "REPORT_EXPLANATION",
+                "general_chat_subgraph",
+                min_confidence=0.9,
+            ),
+            IntentCase(
+                "对我的舌象分析部分，分析的详细一点",
+                "REPORT_EXPLANATION",
+                "general_chat_subgraph",
                 min_confidence=0.9,
             ),
             IntentCase(
@@ -222,3 +237,59 @@ class TestIntentRecognition(unittest.IsolatedAsyncioTestCase):
                     self.assertGreaterEqual(result.confidence, case.min_confidence)
         finally:
             await es.close()
+
+
+class TestIntentSafetyRules(unittest.TestCase):
+    def test_diet_recommendation_is_not_high_risk_safety(self) -> None:
+        self.assertIsNone(match_safety_intent("有什么饮食方面的推荐吗"))
+        self.assertIsNone(match_safety_intent("结合我的舌象报告，饮食上怎么注意"))
+
+    def test_explicit_medication_and_diagnosis_are_high_risk(self) -> None:
+        for text in [
+            "这个药一天吃几片",
+            "我应该吃什么中成药",
+            "帮我判断是不是某某病",
+        ]:
+            with self.subTest(text=text):
+                match = match_safety_intent(text)
+                self.assertIsNotNone(match)
+                self.assertEqual("HIGH_RISK_MEDICAL", match.intent_code)
+                self.assertEqual(RiskLevel.HIGH, match.risk_level)
+
+    def test_es_only_high_risk_candidates_are_filtered(self) -> None:
+        high_risk_hit = RawIntentHit(
+            intent_code="HIGH_RISK_MEDICAL",
+            route_target="high_risk_safety_subgraph",
+            risk_level="HIGH",
+            example_text="给我一个治疗方案",
+            keywords=["治疗方案"],
+            embedding=None,
+            matched_fields=["example_text"],
+            bm25_score=10.0,
+            metadata={},
+        )
+        health_hit = RawIntentHit(
+            intent_code="HEALTH_KNOWLEDGE_QA",
+            route_target="health_qa_subgraph",
+            risk_level="LOW",
+            example_text="饮食怎么注意",
+            keywords=["饮食"],
+            embedding=None,
+            matched_fields=["example_text"],
+            bm25_score=3.0,
+            metadata={},
+        )
+        score = IntentScore(
+            bm25_score=1.0,
+            vector_score=0.8,
+            keyword_score=0.4,
+            fusion_score=0.9,
+        )
+        filtered = IntentRecognitionService._remove_es_only_safety_candidates(
+            [
+                AggregatedIntent(high_risk_hit, score, 0.95, 1, 0.0, 0.0),
+                AggregatedIntent(health_hit, score, 0.65, 1, 0.0, 0.0),
+            ]
+        )
+
+        self.assertEqual(["HEALTH_KNOWLEDGE_QA"], [item.hit.intent_code for item in filtered])

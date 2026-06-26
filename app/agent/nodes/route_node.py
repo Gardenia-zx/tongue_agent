@@ -1,19 +1,23 @@
 from app.agent.state import AgentState
+from app.agent.context_builder import active_report_from_state, query_context_from_state
 
 
 GENERAL_CHAT_ROUTE = "general_chat_subgraph"
+REPORT_FOLLOWUP_ROUTE = "report_followup_subgraph"
 MVP_IMPLEMENTED_ROUTES = {
     "tongue_analysis_subgraph",
     "health_qa_subgraph",
     "privacy_request_subgraph",
     "high_risk_safety_subgraph",
     "general_chat_subgraph",
+    "report_followup_subgraph",
 }
 
 ROUTE_TO_NODE = {
     "tongue_analysis_subgraph": "tongue_analysis_node",
     "health_qa_subgraph": "health_qa_node",
     "report_explanation_subgraph": "report_explanation_node",
+    "report_followup_subgraph": "report_followup_node",
     "trend_analysis_subgraph": "trend_analysis_node",
     "privacy_request_subgraph": "privacy_request_node",
     "high_risk_safety_subgraph": "safety_node",
@@ -40,7 +44,7 @@ def _resolve_next_node(route_target: str) -> tuple[str, bool]:
 
 async def route_node(state: AgentState) -> AgentState:
     intent_result = state.get("intent_result") or {}
-    route_target = _normalize_route_target(intent_result.get("route_target"))
+    route_target = _resolve_route_target_from_state(state)
     next_node, mvp_fallback = _resolve_next_node(route_target)
 
     return {
@@ -62,8 +66,41 @@ async def route_node(state: AgentState) -> AgentState:
     }
 
 
-def select_next_route(state: AgentState) -> str:
+def _resolve_route_target_from_state(state: AgentState) -> str:
     intent_result = state.get("intent_result") or {}
     route_target = _normalize_route_target(intent_result.get("route_target"))
+    query_context = query_context_from_state(state)
+    reference = query_context.get("reference_resolution") or {}
+    target_type = reference.get("target_type")
+    route_hint = query_context.get("route_hint")
+    has_report_context = bool(active_report_from_state(state))
+
+    if route_target in {"high_risk_safety_subgraph", "privacy_request_subgraph"}:
+        return route_target
+
+    if target_type == "REPORT" and has_report_context:
+        return REPORT_FOLLOWUP_ROUTE
+
+    if target_type == "HEALTH_QA":
+        return "health_qa_subgraph"
+
+    if target_type == "GENERAL_CHAT":
+        return GENERAL_CHAT_ROUTE
+
+    if target_type == "TONGUE_ANALYSIS":
+        return "tongue_analysis_subgraph"
+
+    if isinstance(route_hint, str) and route_hint in ROUTE_TO_NODE:
+        if route_hint != REPORT_FOLLOWUP_ROUTE or has_report_context:
+            return route_hint
+
+    if has_report_context and route_target == "report_explanation_subgraph":
+        return REPORT_FOLLOWUP_ROUTE
+
+    return route_target
+
+
+def select_next_route(state: AgentState) -> str:
+    route_target = _resolve_route_target_from_state(state)
     next_node, _ = _resolve_next_node(route_target)
     return next_node
