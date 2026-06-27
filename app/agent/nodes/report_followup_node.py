@@ -2,26 +2,33 @@ import json
 import re
 from typing import Any
 
-from app.agent.context_builder import effective_user_query, with_prompt_context
+from app.agent.context_builder import current_turn_from_state, effective_user_query, with_prompt_context
 from app.agent.nodes.rag_node_utils import answer_with_rag
 from app.agent.state import AgentState
 from app.core.config import get_settings
-from app.integrations.model_gateway import ModelGatewayError, get_chat_model_client
+
+
+def get_chat_model_client():
+    from app.integrations.model_gateway import get_chat_model_client as _get_chat_model_client
+
+    return _get_chat_model_client()
 
 
 FOLLOWUP_REPORT_PROMPT = """你是舌象健康报告的追问助手。
-用户正在追问前面已经生成的舌象报告，你必须基于 context_bundle、recent_messages 和 active_report 展开回答。
+用户正在追问前面已经生成的舌象报告，你必须基于本轮 prompt_context.active_report 中已加载的报告章节展开回答。
 
 要求：
 1. 不要说没有看到图片。
 2. 不要要求用户重新上传图片。
 3. 不要把用户的问题当成新的舌象分析任务。
-4. 不输出诊断结论，不开处方，不给药物剂量。
-5. 直接回答用户关心的结果和建议，语气自然。
-6. 不要输出 Markdown 标题符号，不要输出分隔线。
-7. 如果提供了 rag_context，要结合知识库检索结果给出一般健康管理参考。
-8. 如果用户要求“更详细的报告、完整报告、重新生成详细报告”，要输出一份完整的舌象健康参考报告，不要只给几个观察点。
-9. 返回 JSON：
+4. 不输出疾病确诊结论，不替代医生判断。
+5. 药物、方剂、处方类问题可以做一般知识参考：说明常见方向、适用边界、禁忌和就医沟通要点。
+6. 不要建议用户自行停药、换药、加药或减药；涉及具体剂量、孕期、儿童、老人、慢病或正在用药时提醒医生或药师确认。
+7. 直接回答用户关心的结果和建议，语气自然。
+8. 不要输出 Markdown 标题符号，不要输出分隔线。
+9. 如果提供了 rag_context，要结合知识库检索结果给出一般健康管理参考。
+10. 如果用户要求“更详细的报告、完整报告、重新生成详细报告”，要输出一份完整的舌象健康参考报告，不要只给几个观察点。
+11. 返回 JSON：
 {
   "content": "给用户看的中文回答",
   "structured_content": {
@@ -31,10 +38,10 @@ FOLLOWUP_REPORT_PROMPT = """你是舌象健康报告的追问助手。
     "summary": "直接回答用户关心的结果。若用户要详细报告，这里写完整报告摘要，2 到 4 句话",
     "highlights": ["可选重点标签"],
     "sections": [
-      {"title": "识别结果", "items": ["基于 active_report 的图像识别结果"]},
+      {"title": "识别结果", "items": ["基于本轮已加载报告章节的图像识别结果"]},
       {"title": "舌象说明", "content": "解释舌象特征的一般健康含义"},
       {"title": "可能相关表现", "items": ["结合用户描述和最近消息"]},
-      {"title": "健康管理建议", "items": ["最多 5 条，避免药物剂量和处方"]},
+      {"title": "健康管理建议", "items": ["最多 5 条，必要时包含药物/方剂一般参考和禁忌提醒"]},
       {"title": "继续观察", "items": ["最多 5 条"]}
     ],
     "disclaimer": "安全提醒"
@@ -61,19 +68,27 @@ def context_bundle_from_state(state: AgentState) -> dict[str, Any]:
 
 
 def latest_report_from_state(state: AgentState) -> dict[str, Any] | None:
-    context_bundle = context_bundle_from_state(state)
-    active_report = context_bundle.get("active_report")
-    if isinstance(active_report, dict) and active_report:
-        return active_report
+    current_turn = current_turn_from_state(state)
+    for container_name in ("final_prompt_context", "business_context"):
+        container = current_turn.get(container_name) or {}
+        if not isinstance(container, dict):
+            continue
+        active_report = container.get("active_report")
+        if isinstance(active_report, dict) and active_report.get("sections"):
+            return active_report
+        loaded = container.get("loaded_report_sections")
+        if isinstance(loaded, dict) and loaded.get("sections"):
+            return loaded
+    return None
 
-    client_context = state.get("client_context") or {}
-    client_extra = client_context.get("extra") or {}
-    latest_report = (
-        client_extra.get("latest_report")
-        or client_extra.get("latest_report_context")
-        or client_extra.get("frontend_latest_report")
-    )
-    return latest_report if isinstance(latest_report, dict) else None
+
+def report_context_error_from_state(state: AgentState) -> dict[str, Any] | None:
+    current_turn = current_turn_from_state(state)
+    business_context = current_turn.get("business_context") or {}
+    if not isinstance(business_context, dict):
+        return None
+    error = business_context.get("report_context_error")
+    return error if isinstance(error, dict) else None
 
 
 def recent_messages_from_state(state: AgentState) -> list[dict[str, Any]]:
@@ -524,6 +539,19 @@ async def generate_report_followup_reply(
     context_bundle = context_bundle_from_state(state)
     rag_context: dict[str, Any] | None = None
 
+    if latest_report is None:
+        content = "暂时无法读取当前舌象报告内容，请稍后重试或重新打开报告后再提问。"
+        structured = {
+            "schema_version": "1.0",
+            "answer_type": "REPORT_CONTEXT_UNAVAILABLE",
+            "title": "报告暂不可用",
+            "summary": content,
+            "highlights": [],
+            "sections": [],
+            "disclaimer": "未读取到可信报告内容时，我不会基于旧报告生成个性化建议。",
+        }
+        return content, None, structured
+
     if needs_report_followup_rag(raw_user_text) or needs_report_followup_rag(user_text):
         rag_context = await answer_with_rag(
             build_followup_rag_query(
@@ -562,7 +590,7 @@ async def generate_report_followup_reply(
             max_tokens=settings.chat_model_max_tokens,
         )
         payload = extract_json_object(raw_content)
-    except ModelGatewayError:
+    except Exception:
         payload = None
 
     if isinstance(payload, dict):

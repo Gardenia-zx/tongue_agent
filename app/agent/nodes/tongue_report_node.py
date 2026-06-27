@@ -5,12 +5,17 @@ from typing import Any
 from app.agent.nodes.rag_node_utils import answer_with_rag, fallback_rag_response
 from app.agent.state import AgentState
 from app.core.config import get_settings
-from app.integrations.model_gateway import ModelGatewayError, get_chat_model_client
 from app.schemas.report import (
     ReportImageInfo,
     ReportRagEvidence,
     TongueAnalysisReport,
 )
+
+
+def get_chat_model_client():
+    from app.integrations.model_gateway import get_chat_model_client as _get_chat_model_client
+
+    return _get_chat_model_client()
 from app.schemas.tongue import TongueStandardFeatures
 from app.tongue.feature_mapping import FEATURE_MAPPINGS, build_tongue_feature_rag_query
 
@@ -341,8 +346,9 @@ REPORT_SYNTHESIS_SYSTEM_PROMPT = """你是中医舌象健康管理系统的报�
 要求：
 - 必须把“用户描述”和“舌象特征”关联起来分析，不能只重复图片识别结果。
 - 只能做一般健康知识说明和健康管理参考，不能做疾病诊断。
-- 不开处方，不给药物剂量，不建议自行用药、停药或换药。
-- 如果图像模型只返回少量特征，也要基于用户描述给出可观察方向，不要说“无法得出结论”后结束。
+- 药物、方剂、处方类内容可以做一般知识参考，说明常见方向、适用边界和禁忌；不要声称已经为用户确诊。
+- 不要建议用户自行用药、停药、换药、加药或减药；涉及具体剂量、孕期、儿童、老人、慢病或正在用药时提醒医生或药师确认。
+- 如果图像模型只返回少量特征，也要围绕颜色、厚薄、润燥、质地、拍摄干扰、用户描述给出完整观察方向，不要只写一段话后结束。
 - RAG 资料不足时，可以保守表达，但仍要给出下一步观察建议。
 - 不要解释你是如何推理的，不要使用“综合理解”“核心关联”“证据显示”“根据知识库”等过程型表达。
 - 不要输出 Markdown，不要输出标题符号，不要输出分隔线，不要输出项目符号。
@@ -350,9 +356,9 @@ REPORT_SYNTHESIS_SYSTEM_PROMPT = """你是中医舌象健康管理系统的报�
 
 JSON 格式：
 {
-  "result_summary": "直接给用户看的结果，2 到 4 句话。要把图片特征和用户描述结合起来说，但不能诊断。",
-  "daily_care": ["用户接下来可以做的生活方式建议，最多 4 条，不含药物剂量，不含处方"],
-  "observation": ["接下来需要观察的变化，最多 4 条"],
+  "result_summary": "直接给用户看的结果，4 到 6 句话。要说明已识别特征、可能相关的生活/身体状态、仍需补充的信息和观察边界，但不能诊断。",
+  "daily_care": ["用户接下来可以做的生活方式建议，最多 6 条，必要时可包含药物/方剂一般参考、禁忌和就医沟通要点"],
+  "observation": ["接下来需要观察或复拍确认的变化，最多 6 条"],
   "risk_reminder": "一句安全提醒"
 }
 """
@@ -415,18 +421,18 @@ def _compose_user_facing_report(
     user_description: str,
 ) -> tuple[str, dict[str, Any]] | None:
     result_summary = _clean_text(payload.get("result_summary"), max_length=700)
-    daily_care = _clean_items(payload.get("daily_care"), max_items=4)
-    observation = _clean_items(payload.get("observation"), max_items=4)
+    daily_care = _clean_items(payload.get("daily_care"), max_items=6)
+    observation = _clean_items(payload.get("observation"), max_items=6)
     risk_reminder = _clean_text(payload.get("risk_reminder"), max_length=220)
 
     if not result_summary:
         return None
 
     if not daily_care:
-        daily_care = _build_health_suggestions(feature_names)[:3]
+        daily_care = _build_health_suggestions(feature_names)[:6]
 
     if not observation:
-        observation = _build_observation_points(feature_names)[:3]
+        observation = _build_observation_points(feature_names)[:6]
 
     if not risk_reminder:
         risk_reminder = "以上内容用于一般健康知识说明和健康管理参考，不能替代医生诊断。"
@@ -482,12 +488,27 @@ def _build_structured_report_answer(
         "highlights": highlights,
         "sections": [
             {
+                "title": "识别结果",
+                "items": feature_names or ["图像模型暂未返回明确标准特征"],
+            },
+            {
+                "title": "舌象含义参考",
+                "content": _build_general_interpretation(feature_names),
+            },
+            {
                 "title": "你可以先这样做",
                 "items": daily_care,
             },
             {
                 "title": "接下来观察",
                 "items": observation,
+            },
+            {
+                "title": "补充信息建议",
+                "items": [
+                    "补充近期饮食、睡眠、口腔清洁、胃肠状态和冷热感受，可以让后续分析更贴近实际。",
+                    "建议在自然光、未进食染色食物、同一角度下复拍，便于前后对比。",
+                ],
             },
         ],
         "disclaimer": risk_reminder,
@@ -527,9 +548,9 @@ async def _generate_integrated_report_answer(
         raw_content = await get_chat_model_client().generate(
             messages=messages,
             temperature=0.25,
-            max_tokens=min(settings.chat_model_max_tokens, 1200),
+            max_tokens=min(settings.chat_model_max_tokens, 1800),
         )
-    except ModelGatewayError:
+    except Exception:
         return None
 
     payload = _extract_json_object(raw_content)
@@ -613,6 +634,7 @@ def _build_tongue_analysis_report(
     structured_answer: dict[str, Any] | None,
 ) -> dict[str, Any]:
     report = TongueAnalysisReport(
+        report_status="FINAL",
         report_id=state.get("report_id"),
         user_id=state.get("user_id"),
         thread_id=str(state.get("thread_id") or ""),

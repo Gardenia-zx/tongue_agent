@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,9 @@ WRITE_TRIGGERS = [
     "我的习惯",
     "请保存",
     "帮我保存",
+    "我叫",
+    "叫我",
+    "我的名字是",
 ]
 
 SENSITIVE_HEALTH_KEYWORDS = [
@@ -34,18 +38,6 @@ SENSITIVE_HEALTH_KEYWORDS = [
     "舌象图片",
     "舌头照片",
 ]
-
-LOW_RISK_HEALTH_TOPICS = [
-    "湿气",
-    "脾胃",
-    "睡眠",
-    "上火",
-    "气血",
-    "体质",
-    "舌苔",
-    "舌象",
-]
-
 
 @dataclass(frozen=True)
 class MemoryCandidate:
@@ -147,6 +139,21 @@ def decide_memory_policy(state: AgentState) -> MemoryPolicyDecision:
 
 def build_memory_candidate(text: str) -> MemoryCandidate | None:
     normalized = text.strip()
+
+    name_match = re.search(
+        r"(?:我叫|叫我|我的名字是)\s*([A-Za-z0-9_\u4e00-\u9fa5]{1,20})",
+        normalized,
+    )
+    if name_match:
+        name = name_match.group(1)
+        return MemoryCandidate(
+            memory_type="user_identity",
+            memory_key="user_identity:preferred_name",
+            text=normalized,
+            summary=f"用户希望被称为{name}。",
+            value=name,
+        )
+
     detail_value = _answer_detail_value(normalized)
     if detail_value:
         return MemoryCandidate(
@@ -174,16 +181,6 @@ def build_memory_candidate(text: str) -> MemoryCandidate | None:
             text=normalized,
             summary=f"用户更关注{preferred_feature}。",
             value=preferred_feature,
-        )
-
-    topic = _health_interest_topic(normalized)
-    if topic:
-        return MemoryCandidate(
-            memory_type="health_interest",
-            memory_key=f"health_interest:{topic}",
-            text=normalized,
-            summary=f"用户长期关注{topic}相关健康知识。",
-            value=topic,
         )
 
     if any(word in normalized for word in ["偏好", "喜欢", "习惯"]):
@@ -242,16 +239,5 @@ def _preferred_feature(text: str) -> str | None:
 
     if any(word in text for word in ["健康知识", "中医知识", "科普"]):
         return "健康知识问答"
-
-    return None
-
-
-def _health_interest_topic(text: str) -> str | None:
-    if not any(word in text for word in ["关注", "经常问", "常问", "想了解", "以后"]):
-        return None
-
-    for topic in LOW_RISK_HEALTH_TOPICS:
-        if topic in text:
-            return topic
 
     return None

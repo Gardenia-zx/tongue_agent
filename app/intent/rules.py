@@ -58,21 +58,12 @@ EMERGENCY_PATTERNS = [
     r"抽搐|惊厥",
 ]
 
-PRESCRIPTION_PATTERNS = [
-    r"吃什么.*?药",
-    r"用什么药",
-    r"开什么药",
-    r"开.*?方",
-    r"处方",
-    r"药量|剂量",
-    r"停药|换药|加药|减药",
-    r"药.*?(停|换|加|减|换掉|换一种|换成)",
-    r"药.*?(一天|每次|一次).*?(吃|服).*?(几|多少|\d+).*?(片|粒|颗|袋|毫克|mg)",
-    r"(一天|每次|一次).*?(吃|服).*?(几|多少|\d+).*?(片|粒|颗|袋|毫克|mg).*?药",
-    r"治疗方案",
-    r"诊断",
+DIAGNOSIS_PATTERNS = [
+    r"确诊",
+    r"诊断.*?(疾病|什么病|是不是|是否|我)",
     r"判断.*?是不是.*?病",
     r"是不是.*?病",
+    r"(癌|肿瘤|糖尿病|肾病|肝病|心脏病|冠心病|脑梗|中风).*(吗|是不是|确诊|诊断)",
 ]
 
 GENERAL_CHAT_PATTERNS = [
@@ -106,6 +97,18 @@ TONGUE_CONTINUE_PATTERNS = [
 
 HEALTH_QA_PATTERNS = [
     r"(是什么|什么意思|代表什么|说明什么|为什么|区别|有关系吗|怎么调理|怎么办)",
+]
+
+MEDICAL_REFERENCE_PATTERNS = [
+    r"吃什么.*?药",
+    r"用什么药",
+    r"开什么药",
+    r"开.*?方",
+    r"处方",
+    r"方剂|中成药",
+    r"药量|剂量",
+    r"停药|换药|加药|减药",
+    r"治疗方案",
 ]
 
 REPORT_PATTERNS = [
@@ -159,15 +162,15 @@ def match_safety_intent(text: str) -> RuleIntentMatch | None:
             safety_flags=["EMERGENCY_INTENT"],
         )
 
-    prescription_pattern = _first_pattern_match(text, PRESCRIPTION_PATTERNS)
-    if prescription_pattern:
+    diagnosis_pattern = _first_pattern_match(text, DIAGNOSIS_PATTERNS)
+    if diagnosis_pattern:
         return RuleIntentMatch(
             intent_code="HIGH_RISK_MEDICAL",
             route_target=HIGH_RISK_ROUTE,
             risk_level=RiskLevel.HIGH,
             confidence=1.0,
-            matched_rule="hard_rule_prescription",
-            matched_texts=[prescription_pattern],
+            matched_rule="hard_rule_diagnosis",
+            matched_texts=[diagnosis_pattern],
             safety_flags=["HIGH_RISK_INTENT"],
         )
 
@@ -241,6 +244,17 @@ def match_business_intent(
             risk_level=RiskLevel.LOW,
             confidence=0.95,
             matched_rule="hard_rule_tongue_analysis",
+        )
+
+    medical_reference = _first_pattern_match(text, MEDICAL_REFERENCE_PATTERNS)
+    if medical_reference:
+        return RuleIntentMatch(
+            intent_code="HEALTH_KNOWLEDGE_QA",
+            route_target=HEALTH_QA_ROUTE,
+            risk_level=RiskLevel.LOW,
+            confidence=0.9,
+            matched_rule="hard_rule_medical_reference",
+            matched_texts=[medical_reference],
         )
 
     related_intents = {

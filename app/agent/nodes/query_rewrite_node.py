@@ -401,6 +401,40 @@ def _resolve_reference(state: AgentState) -> dict[str, Any]:
             "evidence_sources": ["raw_user_input", "active_report_ref"],
         }
 
+    if (
+        active_report
+        and _mentions_health_qa_followup(raw_text)
+        and target_focus == FOCUS_DIET_ADVICE
+        and last_route_hint != ROUTE_HEALTH_QA
+        and _answer_type(last_answer) != "HEALTH_QA"
+    ):
+        return {
+            "status": "RESOLVED",
+            "target_type": REF_ACTIVE_REPORT,
+            "target_focus": target_focus,
+            "is_context_dependent": True,
+            "confidence": 0.86,
+            "rule_confidence": 0.86,
+            "route_hint": ROUTE_REPORT_FOLLOWUP,
+            "reason": "用户提出饮食/调理类追问，当前存在可信活动报告",
+            "target_report_id": active_report.get("report_id"),
+            "evidence_sources": ["raw_user_input", "active_report_ref"],
+        }
+
+    if active_report and _is_short_followup(raw_text) and not last_route_hint:
+        return {
+            "status": "RESOLVED",
+            "target_type": REF_ACTIVE_REPORT,
+            "target_focus": target_focus,
+            "is_context_dependent": True,
+            "confidence": 0.84,
+            "rule_confidence": 0.84,
+            "route_hint": ROUTE_REPORT_FOLLOWUP,
+            "reason": "短追问且当前存在可信活动报告",
+            "target_report_id": active_report.get("report_id"),
+            "evidence_sources": ["raw_user_input", "active_report_ref"],
+        }
+
     if _is_short_followup(raw_text) and last_route_hint:
         is_item_ref = _contains_any(raw_text, ["第一个", "第二个", "第三个", "这一项", "那一项"])
         return {

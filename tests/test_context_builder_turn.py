@@ -2,7 +2,7 @@ import unittest
 
 from app.agent.context_builder import (
     CHECKPOINTER_SOURCE,
-    LEGACY_BUNDLE_SOURCE,
+    EMPTY_SOURCE,
     MYSQL_RECOVERY_SOURCE,
     build_final_prompt_context,
     select_short_term_context,
@@ -87,7 +87,7 @@ class TestContextBuilderTurnIsolation(unittest.IsolatedAsyncioTestCase):
         state = {
             **self._base_state(),
             "memory_context": {
-                "session": {"cache_hit": True, "source": "redis"},
+                "session": {"cache_hit": True, "source": "checkpointer"},
                 "recent_turns": [
                     {
                         "request_id": "r1",
@@ -153,12 +153,13 @@ class TestContextBuilderTurnIsolation(unittest.IsolatedAsyncioTestCase):
             },
         }
         selected_legacy = select_short_term_context(legacy_state)
-        self.assertEqual(LEGACY_BUNDLE_SOURCE, selected_legacy["source"])
+        self.assertEqual(EMPTY_SOURCE, selected_legacy["source"])
 
     def test_dedupe_merges_sources_inside_selected_source(self) -> None:
         state = {
             **self._base_state(),
             "context_bundle": {
+                "mode": "mysql_recovery",
                 "recent_messages": [
                     {
                         "message_id": "same-message",
@@ -187,11 +188,10 @@ class TestContextBuilderTurnIsolation(unittest.IsolatedAsyncioTestCase):
             **self._base_state(),
             "options": {"context": {"token_budget": 600}},
             "memory_context": {
+                "session": {"cache_hit": True, "source": "checkpointer"},
                 "relevant_memories": [
                     {"memory_id": "mem-1", "content": "memory " * 1200}
                 ],
-            },
-            "context_bundle": {
                 "conversation_summary": {"text": "summary " * 1200},
                 "recent_turns": [
                     {
@@ -200,6 +200,8 @@ class TestContextBuilderTurnIsolation(unittest.IsolatedAsyncioTestCase):
                         "assistant": "precise previous assistant",
                     }
                 ],
+            },
+            "context_bundle": {
                 "recent_messages": [
                     {
                         "role": "assistant",

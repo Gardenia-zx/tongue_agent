@@ -1,7 +1,5 @@
 import unittest
 
-from langgraph.store.memory import InMemoryStore
-
 from app.memory.service import (
     ACTIVE_STATUS,
     MEMORY_NAMESPACE,
@@ -9,21 +7,44 @@ from app.memory.service import (
     SUPERSEDED_STATUS,
     MemoryService,
 )
-from app.memory.session_cache import ShortTermMemoryCache
+from app.agent.nodes.memory_node import memory_commit_node, memory_read_node
 
 
-class FakeRedis:
+class FakeStoreItem:
+    def __init__(self, key: str, value: dict) -> None:
+        self.key = key
+        self.value = value
+
+
+class FakeStore:
     def __init__(self) -> None:
-        self.data: dict[str, str] = {}
-        self.ttl: dict[str, int] = {}
+        self.data: dict[tuple[str, str], dict[str, dict]] = {}
 
-    async def get(self, key: str) -> str | None:
-        return self.data.get(key)
+    async def aput(self, namespace, key: str, value: dict, index=None) -> None:
+        self.data.setdefault(tuple(namespace), {})[key] = value
 
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        self.data[key] = value
-        if ex is not None:
-            self.ttl[key] = ex
+    async def aget(self, namespace, key: str):
+        value = self.data.get(tuple(namespace), {}).get(key)
+        if value is None:
+            return None
+        return FakeStoreItem(key, value)
+
+    async def adelete(self, namespace, key: str) -> None:
+        self.data.get(tuple(namespace), {}).pop(key, None)
+
+    async def asearch(self, namespace, query=None, filter=None, limit: int = 10):
+        values = self.data.get(tuple(namespace), {})
+        result = []
+        for key, value in values.items():
+            if self._matches(value, filter):
+                result.append(FakeStoreItem(key, value))
+        return result[:limit]
+
+    @staticmethod
+    def _matches(value: dict, filter: dict | None) -> bool:
+        if not filter:
+            return True
+        return all(value.get(key) == expected for key, expected in filter.items())
 
 
 def _state(
@@ -65,7 +86,7 @@ def _state(
 
 class TestMemorySystem(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.store = InMemoryStore()
+        self.store = FakeStore()
         self.service = MemoryService(store=self.store)
 
     async def test_explicit_consent_required_for_long_term_write(self) -> None:
@@ -135,26 +156,109 @@ class TestMemorySystem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(listed["memories"], [])
         self.assertEqual(listed["summaries"], [])
 
-    async def test_short_term_memory_uses_redis_and_compresses_old_turns(self) -> None:
-        redis = FakeRedis()
-        cache = ShortTermMemoryCache(
-            redis=redis,
-            ttl_seconds=3600,
-            keep_last_turns=1,
-            summary_turn_threshold=2,
-            summary_char_threshold=99999,
+    async def test_preferred_name_is_user_profile_memory(self) -> None:
+        result = await self.service.commit_after_response(
+            _state("我叫 zx，你记住了吗", thread_id="thread-a")
         )
 
-        await cache.append_turn(_state("第一轮问题", thread_id="t1"))
-        result = await cache.append_turn(_state("第二轮问题", thread_id="t1"))
-        context = await cache.load_context("t1")
+        self.assertEqual(result["status"], "CREATED")
+        self.assertEqual(result["memory_key"], "user_identity:preferred_name")
 
-        self.assertEqual(result["status"], "UPDATED")
-        self.assertTrue(result["compressed"])
-        self.assertEqual(context["turn_count"], 2)
-        self.assertEqual(len(context["recent_turns"]), 1)
-        self.assertIn("第一轮问题", context["conversation_summary"])
+        profile = await self.store.aget((PROFILE_NAMESPACE, "1"), "profile")
+        preference = profile.value["preferences"]["user_identity:preferred_name"]
+        self.assertEqual(preference["memory_type"], "user_identity")
+        self.assertEqual(preference["value"], "zx")
 
+        cross_thread = await self.service.build_memory_context(
+            _state("你记得我叫什么吗", thread_id="thread-b", can_write=False),
+            session_context={},
+        )
+        self.assertEqual(
+            "zx",
+            cross_thread["profile"]["preferences"]["user_identity:preferred_name"]["value"],
+        )
+
+    async def test_sensitive_symptom_text_is_not_long_term_memory(self) -> None:
+        result = await self.service.commit_after_response(
+            _state("请记住我的症状是胸闷")
+        )
+
+        self.assertEqual(result["status"], "SKIPPED")
+        self.assertEqual(result["reason"], "sensitive_health_memory_blocked")
+        items = await self.store.asearch((MEMORY_NAMESPACE, "1"), limit=10)
+        self.assertEqual(items, [])
+
+    async def test_mysql_recovery_writes_back_checkpointer_short_term_memory(self) -> None:
+        state = {
+            **_state("继续说", can_write=False),
+            "options": {
+                "context": {"mode": "mysql_recovery"},
+                "memory": {"can_read": True, "can_write": False},
+            },
+            "context_bundle": {
+                "mode": "mysql_recovery",
+                "conversation_summary": {"text": "恢复摘要"},
+                "recent_messages": [
+                    {
+                        "message_id": "mysql-a1",
+                        "role": "assistant",
+                        "content_type": "text",
+                        "content": "MySQL 里的上一轮回答",
+                    }
+                ],
+            },
+        }
+
+        read = await memory_read_node(state, store=self.store)
+        self.assertEqual("mysql_recovery", read["memory_context"]["session"]["source"])
+        self.assertEqual(1, len(read["memory_context"]["recent_messages"]))
+
+        committed = await memory_commit_node(read, store=self.store)
+        self.assertEqual("checkpointer", committed["short_term_memory"]["source"])
+        contents = [
+            item["content"]
+            for item in committed["short_term_memory"]["recent_messages"]
+        ]
+        self.assertIn("MySQL 里的上一轮回答", contents)
+        self.assertIn("继续说", contents)
+
+        next_read = await memory_read_node(
+            {
+                **_state("下一轮", can_write=False),
+                "options": {
+                    "context": {"mode": "stateful"},
+                    "memory": {"can_read": True, "can_write": False},
+                },
+                "short_term_memory": committed["short_term_memory"],
+            },
+            store=self.store,
+        )
+
+        self.assertEqual("checkpointer", next_read["memory_context"]["session"]["source"])
+        next_contents = [
+            item["content"]
+            for item in next_read["memory_context"]["recent_messages"]
+        ]
+        self.assertIn("MySQL 里的上一轮回答", next_contents)
+
+    async def test_stateful_context_bundle_does_not_make_turn_stateless(self) -> None:
+        state = {
+            **_state("普通聊天", can_write=False),
+            "options": {
+                "context": {"mode": "stateful"},
+                "memory": {"can_read": True, "can_write": False},
+            },
+            "context_bundle": {
+                "recent_messages": [
+                    {"role": "assistant", "content": "不该作为普通历史"}
+                ]
+            },
+        }
+
+        read = await memory_read_node(state, store=self.store)
+
+        self.assertEqual("checkpointer", read["memory_context"]["session"]["source"])
+        self.assertEqual([], read["memory_context"]["recent_messages"])
 
 if __name__ == "__main__":
     unittest.main()

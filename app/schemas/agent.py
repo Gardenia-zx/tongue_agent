@@ -20,6 +20,7 @@ class AgentMessage(BaseModel):
 class AgentClientContext(BaseModel):
     page: str | None = None
     active_report_id: int | None = None
+    report_context_mode: Literal["AUTO", "NONE", "LAST_ANSWER", "ACTIVE_REPORT"] = "AUTO"
     device_type: str | None = None
     locale: str = "zh-CN"
     extra: dict[str, Any] = Field(default_factory=dict)
