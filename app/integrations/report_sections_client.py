@@ -21,7 +21,7 @@ async def load_report_sections_from_java(
     url = f"{settings.java_backend_base_url.rstrip('/')}/internal/agent/reports/{report_id}/sections"
     headers: dict[str, str] = {}
     if settings.java_internal_api_key:
-        headers["Authorization"] = f"Bearer {settings.java_internal_api_key}"
+        headers["X-Internal-Api-Key"] = settings.java_internal_api_key
 
     payload = {
         "tenant_id": tenant_id,
@@ -38,9 +38,33 @@ async def load_report_sections_from_java(
     try:
         async with httpx.AsyncClient(timeout=settings.report_sections_timeout_seconds) as client:
             response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            result = response.json()
-    except Exception as exc:
+    except httpx.TimeoutException:
+        return {"status": "TIMEOUT", "error": "report_sections_timeout"}
+    except httpx.HTTPError as exc:
         return {"status": "FAILED", "error": type(exc).__name__}
 
+    if response.status_code == 403:
+        return {"status": "FORBIDDEN", "error": "report_sections_forbidden"}
+    if response.status_code == 404:
+        return {"status": "NOT_FOUND", "error": "report_not_found"}
+    if response.status_code == 409:
+        try:
+            result = response.json()
+        except ValueError:
+            result = {}
+        return {
+            "status": "VERSION_MISMATCH",
+            "error": "report_version_mismatch",
+            **(result if isinstance(result, dict) else {}),
+        }
+    if response.status_code >= 400:
+        return {
+            "status": "FAILED",
+            "error": f"report_sections_http_{response.status_code}",
+        }
+
+    try:
+        result = response.json()
+    except ValueError:
+        return {"status": "FAILED", "error": "invalid_response_json"}
     return result if isinstance(result, dict) else {"status": "FAILED", "error": "invalid_response"}
