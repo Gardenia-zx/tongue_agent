@@ -10,7 +10,6 @@ from app.agent.context_builder import (
 from app.agent.state import AgentState
 from app.integrations.report_sections_client import load_report_sections_from_java
 
-
 REPORT_TARGETS = {"ACTIVE_REPORT", "REPORT_ITEM"}
 REPORT_ROUTES = {"report_followup_subgraph", "report_explanation_subgraph"}
 VALID_MODES = {"AUTO", "NONE", "LAST_ANSWER", "ACTIVE_REPORT"}
@@ -19,9 +18,13 @@ VALID_MODES = {"AUTO", "NONE", "LAST_ANSWER", "ACTIVE_REPORT"}
 async def report_context_resolver_node(state: AgentState) -> AgentState:
     current_turn = ensure_current_turn(state)
     business_context = dict(current_turn.get("business_context") or {})
-    business_context.pop("active_report", None)
-    business_context.pop("loaded_report_sections", None)
-    business_context.pop("report_context_error", None)
+    for key in (
+        "active_report",
+        "loaded_report_sections",
+        "report_context_error",
+        "report_context_resolution",
+    ):
+        business_context.pop(key, None)
 
     mode = _report_context_mode(state)
     ref = _active_report_ref(state)
@@ -30,31 +33,26 @@ async def report_context_resolver_node(state: AgentState) -> AgentState:
         "schema_version": "1.0",
         "turn_id": state.get("turn_id") or state.get("request_id"),
         "mode": mode,
+        "report_id": ref.get("report_id") if ref else None,
         "status": "SKIPPED",
         "reason": reason,
         "sections": [],
     }
 
     if not should_load:
-        business_context["active_report_ref"] = ref
-        business_context["report_context_resolution"] = decision
-        current_turn["business_context"] = business_context
-        return {
-            **state,
-            "current_node": "report_context_resolver_node",
-            "current_turn": current_turn,
-        }
+        return _finish(state, current_turn, business_context, ref, decision)
 
     if not ref:
-        decision.update({"status": "FAILED", "reason": "trusted_active_report_ref_missing"})
-        business_context["report_context_error"] = decision
-        business_context["report_context_resolution"] = decision
-        current_turn["business_context"] = business_context
-        return {
-            **state,
-            "current_node": "report_context_resolver_node",
-            "current_turn": current_turn,
-        }
+        decision.update(status="FAILED", reason="trusted_active_report_ref_missing")
+        return _finish(state, current_turn, business_context, ref, decision, error=True)
+
+    if not _is_trusted_ref(ref):
+        decision.update(status="FAILED", reason="untrusted_active_report_ref")
+        return _finish(state, current_turn, business_context, ref, decision, error=True)
+
+    if mode == "ACTIVE_REPORT" and not _matches_requested_report(state, ref):
+        decision.update(status="FAILED", reason="active_report_id_mismatch")
+        return _finish(state, current_turn, business_context, ref, decision, error=True)
 
     sections = _sections_for_query(effective_user_query(state))
     decision["sections"] = sections
@@ -75,26 +73,27 @@ async def report_context_resolver_node(state: AgentState) -> AgentState:
         error_reason = result.get("error") or result.get("status") or "invalid_report_sections"
         if str(error_reason).upper() in {"OK", "SUCCESS", "COMPLETED"}:
             error_reason = "invalid_report_sections"
-        decision.update(
-            {
-                "status": "FAILED",
-                "reason": str(error_reason),
-            }
-        )
-        business_context["active_report_ref"] = ref
-        business_context["report_context_error"] = decision
-        business_context["report_context_resolution"] = decision
-        current_turn["business_context"] = business_context
-        return {
-            **state,
-            "current_node": "report_context_resolver_node",
-            "current_turn": current_turn,
-        }
+        decision.update(status="FAILED", reason=str(error_reason))
+        return _finish(state, current_turn, business_context, ref, decision, error=True)
 
-    decision.update({"status": "LOADED", "reason": "loaded_from_java"})
-    business_context["active_report_ref"] = ref
+    decision.update(status="LOADED", reason="loaded_from_java")
     business_context["loaded_report_sections"] = loaded
+    return _finish(state, current_turn, business_context, ref, decision)
+
+
+def _finish(
+    state: AgentState,
+    current_turn: dict[str, Any],
+    business_context: dict[str, Any],
+    ref: dict[str, Any] | None,
+    decision: dict[str, Any],
+    *,
+    error: bool = False,
+) -> AgentState:
+    business_context["active_report_ref"] = ref
     business_context["report_context_resolution"] = decision
+    if error:
+        business_context["report_context_error"] = decision
     current_turn["business_context"] = business_context
     return {
         **state,
@@ -106,9 +105,7 @@ async def report_context_resolver_node(state: AgentState) -> AgentState:
 def _report_context_mode(state: AgentState) -> str:
     client_context = state.get("client_context") or {}
     extra = client_context.get("extra") if isinstance(client_context, dict) else {}
-    value = None
-    if isinstance(client_context, dict):
-        value = client_context.get("report_context_mode")
+    value = client_context.get("report_context_mode") if isinstance(client_context, dict) else None
     if value is None and isinstance(extra, dict):
         value = extra.get("report_context_mode")
     mode = str(value or "AUTO").upper()
@@ -119,6 +116,16 @@ def _active_report_ref(state: AgentState) -> dict[str, Any] | None:
     context = query_rewrite_context_from_state(state)
     ref = context.get("active_report_ref") if isinstance(context, dict) else None
     return ref if isinstance(ref, dict) and ref.get("report_id") is not None else None
+
+
+def _is_trusted_ref(ref: dict[str, Any]) -> bool:
+    return ref.get("trusted") is True or ref.get("is_current_active_report") is True
+
+
+def _matches_requested_report(state: AgentState, ref: dict[str, Any]) -> bool:
+    client_context = state.get("client_context") or {}
+    requested = client_context.get("active_report_id") if isinstance(client_context, dict) else None
+    return requested is not None and str(requested) == str(ref.get("report_id"))
 
 
 def _should_load_report(
@@ -154,7 +161,7 @@ def _should_load_report(
 
 def _sections_for_query(query: str) -> list[str]:
     compact = "".join(query.split())
-    if any(keyword in compact for keyword in ("完整报告", "详细报告", "更详细的报告", "重新生成报告")):
+    if "报告" in compact and any(keyword in compact for keyword in ("详细", "完整", "展开", "重新生成")):
         return ["full_report"]
     if any(keyword in compact for keyword in ("饮食", "吃什么", "怎么吃", "忌口", "食物")):
         return ["feature_summary", "interpretation", "dietary_advice"]
