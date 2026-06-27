@@ -18,11 +18,14 @@ async def load_report_sections_from_java(
     sections: list[str],
 ) -> dict[str, Any]:
     settings = get_settings()
-    url = f"{settings.java_backend_base_url.rstrip('/')}/internal/agent/reports/{report_id}/sections"
-    headers: dict[str, str] = {}
-    if settings.java_internal_api_key:
-        headers["X-Internal-Api-Key"] = settings.java_internal_api_key
+    if not settings.java_internal_api_key:
+        return {
+            "status": "CONFIG_ERROR",
+            "error": "java_internal_api_key_missing",
+        }
 
+    url = f"{settings.java_backend_base_url.rstrip('/')}/internal/agent/reports/{report_id}/sections"
+    headers = {"X-Internal-Api-Key": settings.java_internal_api_key}
     payload = {
         "tenant_id": tenant_id,
         "user_id": user_id,
@@ -43,28 +46,38 @@ async def load_report_sections_from_java(
     except httpx.HTTPError as exc:
         return {"status": "FAILED", "error": type(exc).__name__}
 
+    try:
+        response_body = response.json()
+    except ValueError:
+        response_body = {}
+    if not isinstance(response_body, dict):
+        response_body = {}
+
     if response.status_code == 403:
-        return {"status": "FORBIDDEN", "error": "report_sections_forbidden"}
+        return {
+            "status": "FORBIDDEN",
+            "error": "report_sections_forbidden",
+            **response_body,
+        }
     if response.status_code == 404:
-        return {"status": "NOT_FOUND", "error": "report_not_found"}
+        return {
+            "status": "NOT_FOUND",
+            "error": "report_not_found",
+            **response_body,
+        }
     if response.status_code == 409:
-        try:
-            result = response.json()
-        except ValueError:
-            result = {}
         return {
             "status": "VERSION_MISMATCH",
             "error": "report_version_mismatch",
-            **(result if isinstance(result, dict) else {}),
+            **response_body,
         }
     if response.status_code >= 400:
         return {
             "status": "FAILED",
             "error": f"report_sections_http_{response.status_code}",
+            **response_body,
         }
 
-    try:
-        result = response.json()
-    except ValueError:
+    if not response_body:
         return {"status": "FAILED", "error": "invalid_response_json"}
-    return result if isinstance(result, dict) else {"status": "FAILED", "error": "invalid_response"}
+    return response_body
