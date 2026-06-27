@@ -9,6 +9,7 @@ from app.agent.nodes.intent_node import intent_node
 from app.agent.nodes.memory_node import memory_commit_node, memory_read_node, memory_recall_node
 from app.agent.nodes.privacy_request_node import privacy_request_node
 from app.agent.nodes.query_rewrite_node import query_rewrite_node
+from app.agent.nodes.report_context_resolver_node import report_context_resolver_node
 from app.agent.nodes.report_followup_node import report_followup_node
 from app.agent.nodes.safety_node import safety_node
 from app.agent.runtime import build_agent_runtime_subgraph
@@ -41,6 +42,7 @@ def build_agent_graph():
     graph.add_node("query_rewrite_node", query_rewrite_node)
     graph.add_node("intent_node", intent_node)
     graph.add_node("agent_gate_node", agent_gate_node)
+    graph.add_node("report_context_resolver_node", report_context_resolver_node)
     graph.add_node("final_context_builder_node", final_context_builder_node)
     graph.add_node("runtime_context_policy_node", runtime_context_policy_node)
     graph.add_node("agent_runtime_subgraph", agent_runtime_subgraph)
@@ -69,7 +71,8 @@ def build_agent_graph():
         },
     )
 
-    graph.add_edge("memory_recall_node", "final_context_builder_node")
+    graph.add_edge("memory_recall_node", "report_context_resolver_node")
+    graph.add_edge("report_context_resolver_node", "final_context_builder_node")
     graph.add_edge("final_context_builder_node", "runtime_context_policy_node")
     graph.add_edge("runtime_context_policy_node", "agent_runtime_subgraph")
 

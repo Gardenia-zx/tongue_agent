@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     tongue_model_timeout_seconds: int = Field(default=120, ge=1, le=600)
     tongue_model_max_concurrency: int = Field(default=2, ge=1, le=16)
     tongue_model_max_image_size_mb: int = Field(default=10, ge=1, le=50)
+    java_backend_base_url: str = "http://127.0.0.1:8080"
+    java_internal_api_key: str | None = None
+    report_sections_timeout_seconds: int = Field(default=8, ge=1, le=60)
 
     agent_lock_ttl_seconds: int = Field(default=120, ge=10, le=600)
     idempotency_ttl_seconds: int = Field(default=86400, ge=60)
@@ -59,6 +62,11 @@ class Settings(BaseSettings):
     rag_chunk_overlap: int = Field(default=80, ge=0, le=500)
     rag_min_relevance_score: float = Field(default=0.2, ge=0.0, le=1.0)
     rag_db_insert_batch_size: int = Field(default=500, ge=1, le=2000)
+    web_search_enabled: bool = True
+    web_search_endpoint: str = "https://api.tavily.com/search"
+    web_search_timeout_seconds: int = Field(default=8, ge=1, le=30)
+    web_search_top_k: int = Field(default=5, ge=1, le=10)
+    tavily_api_key: str | None = None
 
     memory_enabled: bool = True
     long_term_memory_enabled: bool = True

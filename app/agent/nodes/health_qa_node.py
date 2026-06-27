@@ -19,7 +19,11 @@ async def health_qa_node(state: AgentState) -> AgentState:
     state = with_prompt_context(
         state,
         mode="FULL_FOR_NODE",
-        system_prompt="你是中医健康知识问答助手。请基于用户独立问题、最近对话和知识库资料回答，不做诊断，不开处方。",
+        system_prompt=(
+            "你是中医健康知识问答助手。请基于用户独立问题、最近对话和知识库资料回答。"
+            "不要确诊疾病；药物、方剂、处方类问题可以做一般知识参考，说明常见方向、禁忌和就医沟通要点。"
+            "不要建议用户自行停药、换药、加药或减药；特殊人群和具体剂量提醒咨询医生或药师。"
+        ),
         node_name="health_qa_node",
         include_long_term_memory=True,
     )

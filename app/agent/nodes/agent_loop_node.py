@@ -3,7 +3,7 @@ import re
 from typing import Any
 
 from app.agent.context_builder import (
-    active_report_from_state,
+    current_turn_from_state,
     effective_user_query,
     query_context_from_state,
     recent_messages_from_state,
@@ -21,7 +21,12 @@ from app.agent.tooling import (
     choose_agent_tool,
 )
 from app.core.config import get_settings
-from app.integrations.model_gateway import ModelGatewayError, get_chat_model_client
+
+
+def get_chat_model_client():
+    from app.integrations.model_gateway import get_chat_model_client as _get_chat_model_client
+
+    return _get_chat_model_client()
 
 
 MAX_AGENT_LOOP_ITERATIONS = 6
@@ -35,7 +40,9 @@ AGENT_LOOP_SYSTEM_PROMPT = """你是中医舌象健康 Agent 的工具调用决�
 目标：
 - 根据当前用户输入、独立问题、最近对话、当前活动报告和工具结果，决定是否调用工具。
 - 工具结果返回后，继续判断是否还需要工具，或生成最终回答。
-- 你必须遵守健康安全边界：不诊断疾病，不开处方，不给药物剂量，不建议停药或换药。
+- 你必须遵守健康安全边界：不确诊疾病，不替代医生判断；急症要建议立即线下就医。
+- 药物、方剂、处方类问题可以给一般知识参考、常见方向、禁忌和就医沟通要点，但不能声称已经为用户确诊。
+- 不要要求用户自行停药、换药、加药或减药；涉及具体剂量、孕期、儿童、老人、慢病或正在用药时提醒医生或药师确认。
 
 可用工具使用规则：
 - tongue_image_analysis_tool：当用户上传舌象图片、提供 image_path/image_url，或明确要做舌象分析时，必须先调用。
@@ -222,7 +229,7 @@ async def agent_loop_node(state: AgentState) -> AgentState:
                 temperature=settings.chat_model_temperature,
                 max_tokens=settings.chat_model_max_tokens,
             )
-        except ModelGatewayError:
+        except Exception:
             fallback_state = await _run_rule_based_fallback(current_state)
             finish_reason = "model_error_rule_fallback"
             break
@@ -337,6 +344,27 @@ def _parse_tool_call(tool_call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return tool_name, parsed if isinstance(parsed, dict) else {}
 
 
+def _loaded_report_sections_from_state(state: AgentState) -> dict[str, Any] | None:
+    current_turn = current_turn_from_state(state)
+    for container_name in ("final_prompt_context", "business_context"):
+        container = current_turn.get(container_name) or {}
+        if not isinstance(container, dict):
+            continue
+        loaded = container.get("active_report") or container.get("loaded_report_sections")
+        if isinstance(loaded, dict) and loaded.get("sections"):
+            return loaded
+    return None
+
+
+def _report_context_error_from_state(state: AgentState) -> dict[str, Any] | None:
+    current_turn = current_turn_from_state(state)
+    business_context = current_turn.get("business_context") or {}
+    if not isinstance(business_context, dict):
+        return None
+    error = business_context.get("report_context_error")
+    return error if isinstance(error, dict) else None
+
+
 async def _execute_tool_call(
     *,
     state: AgentState,
@@ -358,7 +386,15 @@ async def _execute_tool_call(
         }
 
     if tool_name == REPORT_CONTEXT_TOOL:
-        active_report = active_report_from_state(state)
+        active_report = _loaded_report_sections_from_state(state)
+        report_error = _report_context_error_from_state(state)
+        if report_error:
+            return state, {
+                "status": "FAILED",
+                "tool_name": tool_name,
+                "error": report_error.get("reason") or "report_context_unavailable",
+                "active_report": None,
+            }
         return state, {
             "status": "COMPLETED" if active_report else "EMPTY",
             "tool_name": tool_name,
@@ -685,6 +721,7 @@ def _finish_loop(
     next_action = _merge_agent_loop_into_next_action(
         state.get("next_action"),
         agent_loop,
+        state=state,
     )
     return {
         **state,
@@ -696,12 +733,16 @@ def _finish_loop(
 def _merge_agent_loop_into_next_action(
     next_action: Any,
     agent_loop: dict[str, Any],
+    *,
+    state: AgentState,
 ) -> dict[str, Any]:
+    extra_payload = _final_payload_from_state(state)
     if not isinstance(next_action, dict):
         return {
             "type": "RESPOND_TO_USER",
             "payload": {
                 "status": "COMPLETED",
+                **extra_payload,
                 "agent_loop": agent_loop,
             },
         }
@@ -714,6 +755,23 @@ def _merge_agent_loop_into_next_action(
         **next_action,
         "payload": {
             **payload,
+            **extra_payload,
             "agent_loop": agent_loop,
         },
     }
+
+
+def _final_payload_from_state(state: AgentState) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    draft_report = state.get("draft_report")
+    if isinstance(draft_report, dict) and draft_report:
+        payload["draft_report"] = draft_report
+        payload["rag_query"] = draft_report.get("rag_query") or payload.get("rag_query")
+
+    tongue_features = state.get("tongue_features")
+    if isinstance(tongue_features, dict):
+        codes = tongue_features.get("detected_feature_codes")
+        if codes:
+            payload["detected_feature_codes"] = codes
+
+    return payload

@@ -21,26 +21,13 @@ def _raw_user_input(state: AgentState) -> str:
     content = message.get("content")
     return content.strip() if isinstance(content, str) else ""
 
-
-
-def _explicit_report_reference(text: str) -> bool:
-    compact = "".join(text.split())
-    if not compact:
-        return False
-    markers = (
-        "报告",
-        "上一份舌象",
-        "上一次舌象",
-        "刚才的舌象",
-        "前面的舌象",
-        "这份舌象",
-        "这个舌象",
-        "根据我的舌象",
-        "结合我的舌象",
-        "识别结果",
-        "分析结果",
-    )
-    return any(marker in compact for marker in markers)
+def _report_context_mode(state: AgentState) -> str:
+    client_context = state.get("client_context") or {}
+    extra = client_context.get("extra") if isinstance(client_context, dict) else {}
+    value = client_context.get("report_context_mode") if isinstance(client_context, dict) else None
+    if value is None and isinstance(extra, dict):
+        value = extra.get("report_context_mode")
+    return str(value or "AUTO").upper()
 
 
 
@@ -73,7 +60,7 @@ def can_use_report_followup(state: AgentState) -> bool:
         return True
     if target_type in REPORT_REFERENCE_TARGETS:
         return True
-    return _explicit_report_reference(_raw_user_input(state))
+    return _report_context_mode(state) == "ACTIVE_REPORT"
 
 
 

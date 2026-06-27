@@ -82,6 +82,8 @@ class AgentState(TypedDict, total=False):
 
     # 记忆系统上下文，包括用户画像、长期记忆、摘要、短期会话缓存、写入结果等。
     memory_context: dict[str, Any]
+    # Checkpointer 持久化的短期会话上下文，是当前会话历史的主事实源。
+    short_term_memory: dict[str, Any]
     # Agent Loop / ReAct 模式的运行状态，例如工具调用历史、循环次数、最终回答等。
     agent_loop: dict[str, Any]
 

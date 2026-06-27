@@ -15,15 +15,32 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         last_answer: dict | None = None,
         intent_route: str = "general_chat_subgraph",
     ) -> dict:
+        active_report_ref = None
+        if active_report:
+            active_report_ref = {
+                **active_report,
+                "trusted": True,
+                "owner_user_id": 10001,
+            }
         context_bundle = {
             "conversation_id": "ctx_001",
             "recent_messages": [],
             "last_final_answer": last_answer or {},
-            "active_report": active_report,
+            "active_report_ref": active_report_ref,
             "conversation_summary": None,
         }
         if last_answer:
             context_bundle["recent_messages"].append(last_answer)
+        memory_context = {
+            "session": {
+                "cache_hit": bool(last_answer),
+                "source": "checkpointer",
+            },
+            "recent_messages": context_bundle["recent_messages"],
+            "last_final_answer": last_answer,
+            "conversation_summary": "",
+            "recent_turns": [],
+        }
 
         return {
             "schema_version": "1.0",
@@ -39,9 +56,10 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
                 "attachments": [],
             },
             "context_bundle": context_bundle,
+            "memory_context": memory_context,
             "client_context": {
                 "page": "ai_chat",
-                "extra": {"context_bundle": context_bundle},
+                "extra": {},
             },
             "intent_result": {
                 "primary_intent": "GENERAL_CHAT",

@@ -178,7 +178,10 @@ class TurnLifecycleTests(unittest.TestCase):
                 "query_rewrite_context": {"active_report_ref": {"report_id": 10}},
                 "final_prompt_context": {"active_report": {"report_id": 10}},
             },
-            "prompt_context": {"active_report": {"report_id": 10}},
+            "prompt_context": {
+                "active_report": {"report_id": 10},
+                "active_report_ref": {"report_id": 10},
+            },
             "context_bundle": {"active_report": {"report_id": 10}},
         }
 
@@ -186,7 +189,8 @@ class TurnLifecycleTests(unittest.TestCase):
 
         self.assertTrue(result["context_policy"]["allow_report_context"])
         self.assertTrue(result["context_policy"]["allow_conversation_history"])
-        self.assertEqual(10, result["prompt_context"]["active_report"]["report_id"])
+        self.assertNotIn("active_report", result["prompt_context"])
+        self.assertEqual(10, result["prompt_context"]["active_report_ref"]["report_id"])
 
 
 if __name__ == "__main__":

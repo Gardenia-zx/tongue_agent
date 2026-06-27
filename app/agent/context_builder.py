@@ -9,11 +9,12 @@ from app.agent.state import AgentState
 
 
 ContextMode = Literal["MINIMAL_PRE_INTENT", "FULL_FOR_NODE"]
-ShortTermSource = Literal["CHECKPOINTER", "MYSQL_RECOVERY", "LEGACY_BUNDLE"]
+ShortTermSource = Literal["CHECKPOINTER", "MYSQL_RECOVERY", "EMPTY"]
 
 CHECKPOINTER_SOURCE = "CHECKPOINTER"
 MYSQL_RECOVERY_SOURCE = "MYSQL_RECOVERY"
 LEGACY_BUNDLE_SOURCE = "LEGACY_BUNDLE"
+EMPTY_SOURCE = "EMPTY"
 
 DEFAULT_TOKEN_BUDGET = 3600
 MIN_TOKEN_BUDGET = 600
@@ -194,12 +195,32 @@ def context_bundle_from_state(state: AgentState) -> dict[str, Any]:
     return extra_bundle if isinstance(extra_bundle, dict) else {}
 
 
+def history_context_bundle_from_state(state: AgentState) -> dict[str, Any]:
+    bundle = context_bundle_from_state(state)
+    mode = str(bundle.get("mode") or "").lower()
+    options = state.get("options") or {}
+    context_options = options.get("context") if isinstance(options, dict) else {}
+    context_mode = (
+        str(context_options.get("mode") or "").lower()
+        if isinstance(context_options, dict)
+        else ""
+    )
+    if mode == "mysql_recovery" or context_mode == "stateless":
+        return bundle
+    return {}
+
+
 def _client_extra(state: AgentState) -> dict[str, Any]:
     client_context = state.get("client_context") or {}
     if not isinstance(client_context, dict):
         return {}
     extra = client_context.get("extra") or {}
     return extra if isinstance(extra, dict) else {}
+
+
+def _server_context_bundle(state: AgentState) -> dict[str, Any]:
+    context_bundle = state.get("context_bundle") or {}
+    return context_bundle if isinstance(context_bundle, dict) else {}
 
 
 def _scope(state: AgentState) -> tuple[str, str]:
@@ -474,19 +495,6 @@ def _summary_text(summary: Any) -> str:
     return ""
 
 
-def _active_report_candidates(state: AgentState) -> list[dict[str, Any]]:
-    bundle = context_bundle_from_state(state)
-    client_extra = _client_extra(state)
-    candidates = [
-        bundle.get("active_report"),
-        client_extra.get("active_report"),
-        client_extra.get("latest_report"),
-        client_extra.get("latest_report_context"),
-        client_extra.get("frontend_latest_report"),
-    ]
-    return [item for item in candidates if isinstance(item, dict) and item]
-
-
 def _report_ref(report: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(report, dict) or not report:
         return None
@@ -500,6 +508,14 @@ def _report_ref(report: dict[str, Any] | None) -> dict[str, Any] | None:
         "tenant_id",
         "created_at",
         "updated_at",
+        "report_version",
+        "version",
+        "source_turn_id",
+        "turn_id",
+        "context_version",
+        "is_current_active_report",
+        "trusted",
+        "user_id",
         "feature_summary",
         "featureSummary",
         "summary",
@@ -508,31 +524,45 @@ def _report_ref(report: dict[str, Any] | None) -> dict[str, Any] | None:
             ref[key] = report.get(key)
     if "report_id" not in ref and ref.get("id") is not None:
         ref["report_id"] = ref.get("id")
+    if "report_version" not in ref and ref.get("version") is not None:
+        ref["report_version"] = ref.get("version")
     return ref or None
 
 
 def _active_report_ref_from_state(state: AgentState) -> dict[str, Any] | None:
-    for report in _active_report_candidates(state):
-        ref = _report_ref(report)
-        if ref:
-            return ref
+    bundle = _server_context_bundle(state)
+    ref = _report_ref(bundle.get("active_report_ref"))
+    if not ref or ref.get("report_id") is None:
+        return None
+
+    tenant_id = state.get("tenant_id")
+    if ref.get("tenant_id") is not None and tenant_id is not None and str(ref.get("tenant_id")) != str(tenant_id):
+        return None
+
+    user_id = state.get("user_id")
+    owner_id = ref.get("owner_user_id") or ref.get("user_id")
+    if owner_id is not None and user_id is not None and str(owner_id) != str(user_id):
+        return None
+
+    current_turn_id = current_turn_id_from_state(state)
+    turn_markers = [
+        ref.get("turn_id"),
+        ref.get("context_turn_id"),
+    ]
+    if ref.get("is_current_active_report") is True or ref.get("trusted") is True:
+        return ref
+    if current_turn_id and any(marker is not None and str(marker) == current_turn_id for marker in turn_markers):
+        return ref
     return None
 
 
 def _active_report_full_from_state(state: AgentState) -> dict[str, Any] | None:
     current_turn = current_turn_from_state(state)
-    final_prompt = current_turn.get("final_prompt_context") or {}
-    if isinstance(final_prompt, dict):
-        active_report = final_prompt.get("active_report")
-        if isinstance(active_report, dict) and active_report:
-            return active_report
     business_context = current_turn.get("business_context") or {}
     if isinstance(business_context, dict):
-        active_report = business_context.get("active_report")
-        if isinstance(active_report, dict) and active_report:
-            return active_report
-    for report in _active_report_candidates(state):
-        return report
+        loaded = business_context.get("loaded_report_sections")
+        if isinstance(loaded, dict) and loaded:
+            return loaded
     return None
 
 
@@ -541,26 +571,36 @@ def _checkpoint_payload(state: AgentState) -> dict[str, Any] | None:
     if not isinstance(memory_context, dict):
         return None
     session = memory_context.get("session") or {}
-    if isinstance(session, dict) and session.get("source") == "backend_context_bundle":
+    if not isinstance(session, dict) or session.get("source") != "checkpointer":
         return None
 
     recent_turns = memory_context.get("recent_turns")
+    recent_messages = memory_context.get("recent_messages")
+    last_answer = memory_context.get("last_final_answer")
     summary = memory_context.get("conversation_summary")
-    has_material = bool(recent_turns) or bool(_summary_text(summary))
+    has_material = bool(recent_turns) or bool(recent_messages) or bool(last_answer) or bool(_summary_text(summary))
     if not has_material and not (isinstance(session, dict) and session.get("cache_hit")):
         return None
     return memory_context
 
 
 def _mysql_recovery_payload(state: AgentState) -> dict[str, Any] | None:
+    memory_context = state.get("memory_context") or {}
+    if isinstance(memory_context, dict):
+        session = memory_context.get("session") or {}
+    else:
+        session = {}
     candidates = [
+        memory_context
+        if isinstance(session, dict) and session.get("source") == "mysql_recovery"
+        else None,
         state.get("mysql_recovery_context"),
         state.get("recovery_context"),
         _client_extra(state).get("mysql_recovery_context"),
         _client_extra(state).get("recovery_context"),
     ]
     bundle = context_bundle_from_state(state)
-    if bundle.get("source") == MYSQL_RECOVERY_SOURCE or bundle.get("mode") == "mysql_recovery":
+    if bundle.get("source") == MYSQL_RECOVERY_SOURCE or str(bundle.get("mode") or "").lower() == "mysql_recovery":
         candidates.append(bundle)
     for candidate in candidates:
         if isinstance(candidate, dict) and candidate:
@@ -576,15 +616,9 @@ def _legacy_bundle_payload(state: AgentState) -> dict[str, Any] | None:
     legacy = {
         "recent_messages": client_extra.get("recent_messages") or [],
         "last_final_answer": client_extra.get("last_final_answer") or {},
-        "active_report": (
-            client_extra.get("active_report")
-            or client_extra.get("latest_report")
-            or client_extra.get("latest_report_context")
-            or client_extra.get("frontend_latest_report")
-        ),
         "conversation_summary": client_extra.get("conversation_summary"),
     }
-    if legacy["recent_messages"] or legacy["last_final_answer"] or legacy["active_report"]:
+    if legacy["recent_messages"] or legacy["last_final_answer"]:
         return legacy
     return None
 
@@ -642,9 +676,6 @@ def _payload_summary(payload: dict[str, Any]) -> dict[str, Any] | str | None:
 
 
 def _payload_report_ref(state: AgentState, payload: dict[str, Any]) -> dict[str, Any] | None:
-    report = payload.get("active_report") or payload.get("latest_report")
-    if isinstance(report, dict) and report:
-        return _report_ref(report)
     return _active_report_ref_from_state(state)
 
 
@@ -658,7 +689,6 @@ def _integrity_status(payload: dict[str, Any]) -> str:
 
 
 def select_short_term_context(state: AgentState) -> dict[str, Any]:
-    fallback_reason: str | None = None
     checkpoint_payload = _checkpoint_payload(state)
     if checkpoint_payload is not None:
         return _build_short_term_context(
@@ -678,20 +708,11 @@ def select_short_term_context(state: AgentState) -> dict[str, Any]:
             fallback_reason=fallback_reason,
         )
 
-    fallback_reason = "mysql_recovery_context_missing"
-    legacy_payload = _legacy_bundle_payload(state)
-    if legacy_payload is not None:
-        return _build_short_term_context(
-            state,
-            payload=legacy_payload,
-            source=LEGACY_BUNDLE_SOURCE,
-            fallback_reason=fallback_reason,
-        )
-
     return _dump(
         ShortTermContext(
-            source=LEGACY_BUNDLE_SOURCE,
+            source=EMPTY_SOURCE,
             fallback_reason="all_short_term_sources_missing",
+            active_report_ref=_active_report_ref_from_state(state),
             integrity_status="EMPTY",
         )
     )
@@ -906,7 +927,7 @@ def recent_messages_from_state(state: AgentState) -> list[dict[str, Any]]:
             if isinstance(messages, list) and messages:
                 return [item for item in messages if isinstance(item, dict)][-12:]
 
-    bundle = context_bundle_from_state(state)
+    bundle = history_context_bundle_from_state(state)
     raw_messages = bundle.get("recent_messages")
     if not isinstance(raw_messages, list):
         raw_messages = []
@@ -919,15 +940,18 @@ def active_report_from_state(state: AgentState) -> dict[str, Any] | None:
         container = current_turn.get(container_name) or {}
         if isinstance(container, dict):
             active_report = container.get("active_report")
-            if isinstance(active_report, dict) and active_report:
+            if isinstance(active_report, dict) and active_report.get("sections"):
                 return active_report
+            loaded = container.get("loaded_report_sections")
+            if isinstance(loaded, dict) and loaded.get("sections"):
+                return loaded
     for container_name in ("query_rewrite_context", "short_term_context"):
         container = current_turn.get(container_name) or {}
         if isinstance(container, dict):
             active_report_ref = container.get("active_report_ref")
             if isinstance(active_report_ref, dict) and active_report_ref:
                 return active_report_ref
-    return _active_report_full_from_state(state)
+    return _active_report_ref_from_state(state)
 
 
 def conversation_summary_from_state(state: AgentState) -> dict[str, Any] | str | None:
@@ -937,7 +961,7 @@ def conversation_summary_from_state(state: AgentState) -> dict[str, Any] | str |
         if isinstance(container, dict) and container.get("conversation_summary"):
             return container.get("conversation_summary")
 
-    bundle = context_bundle_from_state(state)
+    bundle = history_context_bundle_from_state(state)
     summary = bundle.get("conversation_summary")
     if summary:
         return summary
@@ -948,7 +972,7 @@ def conversation_summary_from_state(state: AgentState) -> dict[str, Any] | str |
 
 
 def traceback_context_from_state(state: AgentState) -> dict[str, Any]:
-    bundle = context_bundle_from_state(state)
+    bundle = history_context_bundle_from_state(state)
     traceback_context = bundle.get("traceback_context") or {}
     return traceback_context if isinstance(traceback_context, dict) else {}
 
@@ -962,7 +986,7 @@ def last_final_answer_from_state(state: AgentState) -> dict[str, Any] | None:
             if isinstance(answer, dict) and answer.get("content"):
                 return answer
 
-    bundle = context_bundle_from_state(state)
+    bundle = history_context_bundle_from_state(state)
     bundled = bundle.get("last_final_answer")
     if isinstance(bundled, dict) and bundled.get("content"):
         return _assistant_answer_context(bundled)
@@ -993,8 +1017,7 @@ def _business_context_from_state(state: AgentState) -> dict[str, Any]:
     business_context = current_turn.get("business_context")
     if isinstance(business_context, dict) and business_context:
         return business_context
-    value = state.get("business_context")
-    return value if isinstance(value, dict) else {}
+    return {}
 
 
 def _privacy_policy_from_state(state: AgentState) -> dict[str, Any]:
@@ -1120,11 +1143,11 @@ def build_final_prompt_context(
     query_context = query_context_from_state(state)
     business_context = _business_context_from_state(state)
     active_report = (
-        business_context.get("active_report")
-        if isinstance(business_context.get("active_report"), dict)
+        business_context.get("loaded_report_sections")
+        if isinstance(business_context.get("loaded_report_sections"), dict)
         else None
     )
-    active_report_ref = _report_ref(active_report) or query_rewrite_context.get("active_report_ref")
+    active_report_ref = query_rewrite_context.get("active_report_ref")
     last_answer = last_final_answer_from_state(state)
 
     final_context = _dump(
@@ -1144,7 +1167,7 @@ def build_final_prompt_context(
             recent_turns=query_rewrite_context.get("recent_turns") or [],
             conversation_summary=query_rewrite_context.get("conversation_summary"),
             last_final_answer=last_answer,
-            active_report=active_report or active_report_ref,
+            active_report=active_report,
             active_report_ref=active_report_ref,
             business_context=business_context,
             privacy_policy=_privacy_policy_from_state(state),

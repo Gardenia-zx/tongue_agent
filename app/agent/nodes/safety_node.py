@@ -14,16 +14,11 @@ EMERGENCY_KEYWORDS = [
     "抽搐",
 ]
 
-PRESCRIPTION_KEYWORDS = [
-    "开药",
-    "处方",
-    "吃什么药",
-    "药量",
-    "剂量",
-    "停药",
-    "换药",
-    "加药",
-    "减药",
+DIAGNOSIS_KEYWORDS = [
+    "确诊",
+    "诊断",
+    "是不是病",
+    "判断是不是",
 ]
 
 
@@ -45,15 +40,15 @@ def _detect_safety_type(text: str, intent_result: dict[str, Any]) -> tuple[str, 
         return "EMERGENCY", "检测到急症或严重不适风险"
 
     if risk_level == "HIGH" or "HIGH_RISK_INTENT" in safety_flags:
-        return "HIGH_RISK_MEDICAL", "检测到高风险医疗请求"
+        return "DIAGNOSIS_REQUEST", "检测到明确诊断请求"
 
     for keyword in EMERGENCY_KEYWORDS:
         if keyword in text:
             return "EMERGENCY", f"命中急症关键词：{keyword}"
 
-    for keyword in PRESCRIPTION_KEYWORDS:
+    for keyword in DIAGNOSIS_KEYWORDS:
         if keyword in text:
-            return "PRESCRIPTION_REQUEST", f"命中用药关键词：{keyword}"
+            return "DIAGNOSIS_REQUEST", f"命中诊断关键词：{keyword}"
 
     return "GENERAL_SAFETY", "进入安全兜底处理"
 
@@ -67,24 +62,16 @@ def _build_safety_reply(safety_type: str) -> str:
             "请立即联系当地急救电话或尽快前往线下医疗机构。"
         )
 
-    if safety_type == "PRESCRIPTION_REQUEST":
+    if safety_type == "DIAGNOSIS_REQUEST":
         return (
-            "我不能提供处方、药物剂量、停药或换药建议。"
-            "这些需要医生结合病史、检查结果和正在使用的药物综合判断。"
-            "如果你有用药相关问题，建议咨询线下医生或药师。"
-        )
-
-    if safety_type == "HIGH_RISK_MEDICAL":
-        return (
-            "这个问题涉及较高风险的医疗判断。"
-            "我可以提供一般健康知识说明，但不能做诊断、处方或替代医生建议。"
-            "如果症状明显、持续加重，或你正在用药、孕期、儿童、老人等特殊情况，"
-            "建议及时线下就医或咨询专业医生。"
+            "我不能通过线上对话为你确诊疾病，或替代医生做医疗判断。"
+            "我可以解释相关概念、常见可能方向、需要观察的信息和就医沟通要点。"
+            "如果你希望判断是否患有某种疾病，建议结合线下检查和医生面诊。"
         )
 
     return (
         "这个问题需要谨慎处理。我可以提供一般健康管理信息，"
-        "但不能做疾病诊断、处方、药物剂量或替代医生判断。"
+        "但不能做疾病确诊或替代医生判断。"
     )
 
 
@@ -105,7 +92,7 @@ async def safety_node(state: AgentState) -> AgentState:
         "risk_type": safety_type,
         "reason": reason,
         "rewrite_required": False,
-        "human_review_required": safety_type in {"HIGH_RISK_MEDICAL", "EMERGENCY"},
+        "human_review_required": safety_type in {"DIAGNOSIS_REQUEST", "EMERGENCY"},
     }
 
     return {

@@ -388,30 +388,6 @@ class IntentRecognitionService:
                 },
             )
 
-        if highest_risk == RiskLevel.HIGH:
-            return IntentResult(
-                engine="RULE_ES_BM25_TEXT2VEC_HYBRID",
-                engine_version="intent-hybrid-v1.1",
-                detected_intent="HIGH_RISK_MEDICAL",
-                primary_intent="HIGH_RISK_MEDICAL",
-                secondary_intents=[],
-                confidence=1.0,
-                decision=IntentDecision.ROUTE,
-                route_target=HIGH_RISK_ROUTE,
-                risk_level=RiskLevel.HIGH,
-                entities=self._entities_from_domain_terms(direct_risk_terms),
-                safety_flags=["HIGH_RISK_INTENT"],
-                debug={
-                    "risk_override": "domain_term_repository",
-                    "original_query": normalization.original_text,
-                    "normalized_query": normalization.normalized_text,
-                    "query_replacements": normalization.replacements,
-                    "normalized_terms": [
-                        term.normalized_term for term in direct_risk_terms
-                    ],
-                },
-            )
-
         return None
 
     @staticmethod

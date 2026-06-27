@@ -162,24 +162,21 @@ class TestIntentRecognition(unittest.IsolatedAsyncioTestCase):
             ),
             IntentCase(
                 "我应该吃什么药",
-                "HIGH_RISK_MEDICAL",
-                "high_risk_safety_subgraph",
-                RiskLevel.HIGH,
-                min_confidence=1.0,
+                "HEALTH_KNOWLEDGE_QA",
+                "health_qa_subgraph",
+                min_confidence=0.9,
             ),
             IntentCase(
                 "这个情况要不要停药",
-                "HIGH_RISK_MEDICAL",
-                "high_risk_safety_subgraph",
-                RiskLevel.HIGH,
-                min_confidence=1.0,
+                "HEALTH_KNOWLEDGE_QA",
+                "health_qa_subgraph",
+                min_confidence=0.9,
             ),
             IntentCase(
                 "给我一个治疗方案",
-                "HIGH_RISK_MEDICAL",
-                "high_risk_safety_subgraph",
-                RiskLevel.HIGH,
-                min_confidence=1.0,
+                "HEALTH_KNOWLEDGE_QA",
+                "health_qa_subgraph",
+                min_confidence=0.9,
             ),
             IntentCase(
                 "我现在胸好痛",
@@ -244,17 +241,14 @@ class TestIntentSafetyRules(unittest.TestCase):
         self.assertIsNone(match_safety_intent("有什么饮食方面的推荐吗"))
         self.assertIsNone(match_safety_intent("结合我的舌象报告，饮食上怎么注意"))
 
-    def test_explicit_medication_and_diagnosis_are_high_risk(self) -> None:
-        for text in [
-            "这个药一天吃几片",
-            "我应该吃什么中成药",
-            "帮我判断是不是某某病",
-        ]:
-            with self.subTest(text=text):
-                match = match_safety_intent(text)
-                self.assertIsNotNone(match)
-                self.assertEqual("HIGH_RISK_MEDICAL", match.intent_code)
-                self.assertEqual(RiskLevel.HIGH, match.risk_level)
+    def test_medication_reference_is_allowed_but_diagnosis_is_high_risk(self) -> None:
+        self.assertIsNone(match_safety_intent("这个药一天吃几片"))
+        self.assertIsNone(match_safety_intent("我应该吃什么中成药"))
+
+        match = match_safety_intent("帮我判断是不是某某病")
+        self.assertIsNotNone(match)
+        self.assertEqual("HIGH_RISK_MEDICAL", match.intent_code)
+        self.assertEqual(RiskLevel.HIGH, match.risk_level)
 
     def test_es_only_high_risk_candidates_are_filtered(self) -> None:
         high_risk_hit = RawIntentHit(

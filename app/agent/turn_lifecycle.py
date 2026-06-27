@@ -231,6 +231,12 @@ def _sanitize_container(
         for key in REPORT_CONTEXT_KEYS:
             result.pop(key, None)
         result.pop("reference_target", None)
+    else:
+        for key in ("latest_report", "latest_report_context", "frontend_latest_report"):
+            result.pop(key, None)
+        active_report = result.get("active_report")
+        if isinstance(active_report, dict) and not active_report.get("sections"):
+            result.pop("active_report", None)
     if not allow_history:
         for key in HISTORY_CONTEXT_KEYS:
             if key in {"recent_messages", "recent_turns"}:

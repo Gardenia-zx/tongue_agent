@@ -9,6 +9,8 @@ from app.agent.nodes.route_node import route_node, select_next_route
 class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
     def _followup_state(self) -> dict:
         return {
+            "turn_id": "turn-followup",
+            "request_id": "request-followup",
             "thread_id": "followup_thread",
             "user_id": 10001,
             "message": {
@@ -19,20 +21,23 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
             },
             "client_context": {
                 "page": "ai_chat",
-                "extra": {
-                    "latest_report": {
-                        "report_id": 12,
-                        "feature_summary": "本次图像识别到的主要舌象特征包括：白苔。",
-                        "summary": "本次结果\n图片主要识别到白苔，结合睡眠不好和疲惫，可继续观察舌苔厚薄、润燥和近期精神状态。",
-                    },
-                    "recent_messages": [
-                        {
-                            "role": "assistant",
-                            "content": "本次结果\n图片主要识别到白苔，结合睡眠不好和疲惫，可继续观察舌苔厚薄、润燥和近期精神状态。",
-                            "report_id": 12,
-                        }
-                    ],
+                "extra": {},
+            },
+            "context_bundle": {
+                "active_report_ref": {
+                    "report_id": 12,
+                    "report_version": 1,
+                    "feature_summary": "本次图像识别到的主要舌象特征包括：白苔。",
+                    "summary": "本次结果\n图片主要识别到白苔，结合睡眠不好和疲惫，可继续观察舌苔厚薄、润燥和近期精神状态。",
+                    "trusted": True,
                 },
+                "recent_messages": [
+                    {
+                        "role": "assistant",
+                        "content": "本次结果\n图片主要识别到白苔，结合睡眠不好和疲惫，可继续观察舌苔厚薄、润燥和近期精神状态。",
+                        "report_id": 12,
+                    }
+                ],
             },
             "intent_result": {
                 "primary_intent": "TONGUE_ANALYSIS_START",
@@ -51,10 +56,12 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
         }
         state["context_bundle"] = {
             "conversation_id": "90001",
-            "active_report": {
+            "active_report_ref": {
                 "report_id": 22,
+                "report_version": 1,
                 "feature_summary": "白苔",
                 "summary": "图片主要识别到白苔，用户描述睡眠差、容易惊醒。",
+                "trusted": True,
             },
             "conversation_summary": {
                 "summary_id": 5,
@@ -68,6 +75,25 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
                     "report_id": 22,
                 }
             ],
+        }
+        state["current_turn"] = {
+            "turn_id": "turn-followup",
+            "business_context": {
+                "loaded_report_sections": {
+                    "schema_version": "1.0",
+                    "source": "java_report_sections",
+                    "report_id": 22,
+                    "report_version": 1,
+                    "feature_summary": "白苔",
+                    "summary": "图片主要识别到白苔，用户描述睡眠差、容易惊醒。",
+                    "requested_sections": ["feature_summary", "interpretation", "dietary_advice"],
+                    "sections": {
+                        "feature_summary": "白苔",
+                        "interpretation": "图片主要识别到白苔，用户描述睡眠差、容易惊醒。",
+                        "dietary_advice": ["清淡规律", "少生冷甜腻"],
+                    },
+                }
+            },
         }
         return state
 
@@ -233,6 +259,7 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
             "role": "assistant",
             "content": "饮食建议：近期少吃生冷、油腻、甜腻，三餐规律，观察腹胀和大便状态。",
             "report_id": 22,
+            "answer_type": "REPORT_FOLLOWUP",
             "metadata": {
                 "node_name": "report_followup_node",
                 "route_target": "report_followup_subgraph",
@@ -247,6 +274,13 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
         state["context_bundle"]["recent_messages"] = [
             state["context_bundle"]["last_final_answer"]
         ]
+        state["current_turn"]["query_rewrite_context"] = {
+            "turn_id": "turn-followup",
+            "context_version": "query_rewrite_context.v1",
+            "raw_user_input": "还是不够详细",
+            "active_report_ref": state["context_bundle"]["active_report_ref"],
+            "last_final_answer": state["context_bundle"]["last_final_answer"],
+        }
         rewritten = await query_rewrite_node(state)
         rag_result = {
             "answer": "饮食宜清淡规律，少生冷甜腻，注意观察腹胀、大便和食欲变化。",
