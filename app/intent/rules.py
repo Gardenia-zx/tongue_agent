@@ -10,6 +10,7 @@ GENERAL_CHAT_ROUTE = "general_chat_subgraph"
 TONGUE_ANALYSIS_ROUTE = "tongue_analysis_subgraph"
 HEALTH_QA_ROUTE = "health_qa_subgraph"
 REPORT_EXPLANATION_ROUTE = "report_explanation_subgraph"
+REPORT_FOLLOWUP_ROUTE = "report_followup_subgraph"
 TREND_ANALYSIS_ROUTE = "trend_analysis_subgraph"
 PRIVACY_ROUTE = "privacy_request_subgraph"
 
@@ -86,6 +87,9 @@ REPORT_FOLLOWUP_PATTERNS = [
     r"(我的|这份|这个|刚才|前面|上面|上次).*?(舌象分析|报告|分析).*?(详细|具体|展开|补充|再说)",
     r"(舌象分析|报告|分析).*?(不够详细|太简单|详细一点|详细点|具体一点|具体点|展开说)",
     r"(讲|说|回答|分析).*?(详细一点|详细点|具体一点|具体点|展开说说)",
+    r"(给我|生成|重新生成|需要|想要).*?(更|再|一个)?.*?(详细|完整|具体).*?(舌象)?报告",
+    r"(更|再|重新)?.*?(详细|完整|具体).*?(一点|一些)?.*?(舌象)?报告",
+    r"(这个|这份|当前|刚才|上面).*?报告.*?(太简单|不够详细|内容太少|过于简单)",
 ]
 
 TONGUE_CONTINUE_PATTERNS = [
@@ -117,7 +121,10 @@ REPORT_PATTERNS = [
 ]
 
 TREND_PATTERNS = [
-    r"趋势|历史趋势|最近几次|这几次|和上次相比|相比|变化",
+    r"历史趋势|趋势分析",
+    r"(最近|过去|历史|这).*?(几次|多次|一段时间|一个月|三个月).*?(报告|舌象)?.*?(变化|趋势|对比|比较)",
+    r"(和|与).*?(上次|之前|上一份|前一次).*?(相比|比较|变化|怎么样)",
+    r"(这几次|最近几次).*?(舌象|报告)?.*?(变化|趋势|相比)",
 ]
 
 PRIVACY_PATTERNS = [
@@ -194,9 +201,9 @@ def match_business_intent(
     if report_followup_pattern:
         return RuleIntentMatch(
             intent_code="REPORT_EXPLANATION",
-            route_target=GENERAL_CHAT_ROUTE,
+            route_target=REPORT_FOLLOWUP_ROUTE,
             risk_level=RiskLevel.LOW,
-            confidence=0.96,
+            confidence=0.98,
             matched_rule="hard_rule_report_followup",
             matched_texts=[report_followup_pattern],
         )
@@ -231,7 +238,7 @@ def match_business_intent(
     if _first_pattern_match(text, REPORT_PATTERNS):
         return RuleIntentMatch(
             intent_code="REPORT_EXPLANATION",
-            route_target=REPORT_EXPLANATION_ROUTE,
+            route_target=REPORT_FOLLOWUP_ROUTE,
             risk_level=RiskLevel.LOW,
             confidence=0.92,
             matched_rule="hard_rule_report_explanation",
