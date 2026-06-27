@@ -8,6 +8,9 @@ from app.intent.domain_terms import DomainTermNormalizer
 from app.intent.es_intent_retriever import ESIntentRetriever
 
 
+REPORT_ROUTE = "report_followup_subgraph"
+
+
 def _get_embedding_model() -> Any:
     from app.integrations.model_gateway import get_embedding_model
 
@@ -73,6 +76,32 @@ def _clarification_intent_result() -> dict[str, Any]:
     }
 
 
+def _canonicalize_report_followup(
+    intent_result: dict[str, Any],
+    *,
+    query_context: dict[str, Any],
+) -> dict[str, Any]:
+    adjusted = dict(intent_result)
+    adjusted.update(
+        {
+            "detected_intent": "REPORT_EXPLANATION",
+            "primary_intent": "REPORT_EXPLANATION",
+            "secondary_intents": [],
+            "confidence": max(float(adjusted.get("confidence") or 0.0), 0.98),
+            "decision": "ROUTE",
+            "route_target": REPORT_ROUTE,
+            "risk_level": "LOW",
+            "missing_slots": [],
+        }
+    )
+    debug = dict(adjusted.get("debug") or {})
+    debug["query_rewrite_route_hint"] = REPORT_ROUTE
+    debug["query_rewrite_reference"] = query_context.get("reference_resolution") or {}
+    debug["intent_override_reason"] = "trusted_report_reference_resolved"
+    adjusted["debug"] = debug
+    return adjusted
+
+
 def _apply_route_hint(
     intent_result: dict[str, Any],
     state: AgentState,
@@ -80,7 +109,7 @@ def _apply_route_hint(
     query_context = query_context_from_state(state)
     route_hint = query_context.get("route_hint")
     if route_hint not in {
-        "report_followup_subgraph",
+        REPORT_ROUTE,
         "health_qa_subgraph",
         "general_chat_subgraph",
         "tongue_analysis_subgraph",
@@ -91,8 +120,13 @@ def _apply_route_hint(
     if current_route in {"high_risk_safety_subgraph", "privacy_request_subgraph"}:
         return intent_result
 
-    if route_hint == "report_followup_subgraph" and not active_report_from_state(state):
-        return intent_result
+    if route_hint == REPORT_ROUTE:
+        if not active_report_from_state(state):
+            return intent_result
+        return _canonicalize_report_followup(
+            intent_result,
+            query_context=query_context,
+        )
 
     adjusted = dict(intent_result)
     adjusted["route_target"] = route_hint
