@@ -14,6 +14,16 @@ from app.integrations.report_sections_client import load_report_sections_from_ja
 REPORT_TARGETS = {"ACTIVE_REPORT", "REPORT_ITEM"}
 REPORT_ROUTES = {"report_followup_subgraph", "report_explanation_subgraph"}
 VALID_MODES = {"AUTO", "NONE", "LAST_ANSWER", "ACTIVE_REPORT"}
+ALLOWED_REPORT_SECTIONS = {
+    "feature_summary",
+    "interpretation",
+    "dietary_advice",
+    "exercise_advice",
+    "lifestyle_advice",
+    "risk_disclaimer",
+    "rag_evidence_summary",
+    "full_report",
+}
 
 
 async def report_context_resolver_node(state: AgentState) -> AgentState:
@@ -29,7 +39,13 @@ async def report_context_resolver_node(state: AgentState) -> AgentState:
 
     mode = _report_context_mode(state)
     ref = _active_report_ref(state)
-    should_load, reason = _should_load_report(state, mode=mode, ref=ref)
+    report_load_plan = _report_load_plan_from_state(state)
+    should_load, reason = _should_load_report(
+        state,
+        mode=mode,
+        ref=ref,
+        report_load_plan=report_load_plan,
+    )
     decision = {
         "schema_version": "1.0",
         "turn_id": state.get("turn_id") or state.get("request_id"),
@@ -39,6 +55,15 @@ async def report_context_resolver_node(state: AgentState) -> AgentState:
         "reason": reason,
         "sections": [],
     }
+    if report_load_plan is not None:
+        decision["report_load_plan"] = {
+            "need_report": bool(report_load_plan.get("need_report")),
+            "target_report_id": report_load_plan.get("target_report_id"),
+            "target_type": report_load_plan.get("target_type"),
+            "target_focus": report_load_plan.get("target_focus"),
+            "sections": report_load_plan.get("sections") or [],
+            "confidence": report_load_plan.get("confidence"),
+        }
 
     if not should_load:
         return _finish(state, current_turn, business_context, ref, decision)
@@ -55,9 +80,19 @@ async def report_context_resolver_node(state: AgentState) -> AgentState:
         decision.update(status="FAILED", reason="active_report_id_mismatch")
         return _finish(state, current_turn, business_context, ref, decision, error=True)
 
-    sections = _sections_for_query(effective_user_query(state))
+    if report_load_plan is not None and not _report_plan_matches_ref(report_load_plan, ref):
+        decision.update(status="FAILED", reason="report_load_plan_report_id_mismatch")
+        return _finish(state, current_turn, business_context, ref, decision, error=True)
+
+    sections = _sections_from_report_load_plan(report_load_plan)
+    if report_load_plan is not None and report_load_plan.get("need_report") and not sections:
+        decision.update(status="FAILED", reason="invalid_report_load_plan_sections")
+        return _finish(state, current_turn, business_context, ref, decision, error=True)
+    if not sections:
+        sections = _sections_for_query(effective_user_query(state))
     decision["sections"] = sections
-    result = await _load_sections(state, ref=ref, sections=sections)
+    preloaded = _preloaded_sections(state, sections=sections)
+    result = preloaded or await _load_sections(state, ref=ref, sections=sections)
 
     if str(result.get("status") or "").upper() == "VERSION_MISMATCH":
         current_version = result.get("report_version")
@@ -87,11 +122,26 @@ async def report_context_resolver_node(state: AgentState) -> AgentState:
 
     decision.update(
         status="LOADED",
-        reason="loaded_from_java",
+        reason="loaded_from_context_bundle" if preloaded else "loaded_from_java",
         report_version=loaded.get("report_version"),
     )
     business_context["loaded_report_sections"] = loaded
     return _finish(state, current_turn, business_context, ref, decision)
+
+
+def _preloaded_sections(state: AgentState, *, sections: list[str]) -> dict[str, Any] | None:
+    bundle = state.get("context_bundle") or {}
+    if not isinstance(bundle, dict):
+        return None
+    loaded = bundle.get("loaded_report_sections")
+    if not isinstance(loaded, dict) or not loaded:
+        return None
+    raw_sections = loaded.get("sections")
+    if raw_sections is None and isinstance(loaded.get("data"), dict):
+        raw_sections = loaded["data"].get("sections")
+    if not isinstance(raw_sections, dict):
+        return None
+    return loaded if all(section in raw_sections for section in sections) else None
 
 
 async def _load_sections(
@@ -167,16 +217,44 @@ def _matches_requested_report(state: AgentState, ref: dict[str, Any]) -> bool:
     return str(requested) == str(ref.get("report_id"))
 
 
+def _report_load_plan_from_state(state: AgentState) -> dict[str, Any] | None:
+    query_context = query_context_from_state(state)
+    plan = query_context.get("report_load_plan") if isinstance(query_context, dict) else None
+    return plan if isinstance(plan, dict) else None
+
+
+def _report_plan_matches_ref(plan: dict[str, Any], ref: dict[str, Any]) -> bool:
+    target_report_id = plan.get("target_report_id")
+    return target_report_id is None or str(target_report_id) == str(ref.get("report_id"))
+
+
+def _sections_from_report_load_plan(plan: dict[str, Any] | None) -> list[str]:
+    if not isinstance(plan, dict) or not plan.get("need_report"):
+        return []
+    sections = plan.get("sections") or []
+    if not isinstance(sections, list):
+        return []
+    deduped = list(dict.fromkeys(str(section) for section in sections))
+    if not deduped or any(section not in ALLOWED_REPORT_SECTIONS for section in deduped):
+        return []
+    return deduped
+
+
 def _should_load_report(
     state: AgentState,
     *,
     mode: str,
     ref: dict[str, Any] | None,
+    report_load_plan: dict[str, Any] | None,
 ) -> tuple[bool, str]:
     if mode == "NONE":
         return False, "mode_none"
     if mode == "ACTIVE_REPORT":
         return True, "mode_active_report"
+    if isinstance(report_load_plan, dict):
+        if report_load_plan.get("need_report"):
+            return True, "query_rewrite_report_load_plan"
+        return False, "query_rewrite_plan_no_report_dependency"
 
     query_context = query_context_from_state(state)
     reference = query_context.get("reference_resolution") or {}

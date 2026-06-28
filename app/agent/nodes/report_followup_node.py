@@ -79,7 +79,30 @@ def latest_report_from_state(state: AgentState) -> dict[str, Any] | None:
         loaded = container.get("loaded_report_sections")
         if isinstance(loaded, dict) and loaded.get("sections"):
             return loaded
+        fallback_ref = _trusted_report_ref(container.get("active_report_ref"))
+        if fallback_ref is not None:
+            return fallback_ref
+    for container in (
+        state.get("prompt_context"),
+        current_turn.get("query_rewrite_context"),
+        state.get("query_rewrite_context"),
+        context_bundle_from_state(state),
+    ):
+        if isinstance(container, dict):
+            fallback_ref = _trusted_report_ref(container.get("active_report_ref"))
+            if fallback_ref is not None:
+                return fallback_ref
     return None
+
+
+def _trusted_report_ref(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("report_id") is None:
+        return None
+    if value.get("trusted") is not True and value.get("is_current_active_report") is not True:
+        return None
+    if not (value.get("summary") or value.get("feature_summary") or value.get("featureSummary")):
+        return None
+    return value
 
 
 def report_context_error_from_state(state: AgentState) -> dict[str, Any] | None:

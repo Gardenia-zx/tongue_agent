@@ -124,8 +124,48 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("ACTIVE_REPORT", rewritten["query_context"]["reference_resolution"]["target_type"])
         self.assertEqual("report_followup_subgraph", rewritten["query_context"]["route_hint"])
         self.assertIn("当前活动舌象报告", rewritten["query_context"]["standalone_query"])
+        self.assertEqual(
+            [
+                "full_report",
+                "feature_summary",
+                "interpretation",
+                "dietary_advice",
+                "lifestyle_advice",
+                "risk_disclaimer",
+            ],
+            rewritten["query_context"]["report_load_plan"]["sections"],
+        )
+        self.assertTrue(rewritten["query_context"]["report_load_plan"]["need_report"])
         self.assertEqual("report_followup_node", select_next_route(rewritten))
         self.assertEqual("report_followup_subgraph", routed["next_action"]["payload"]["route_target"])
+
+    async def test_diet_request_with_active_report_loads_diet_sections(self) -> None:
+        state = self._state(
+            "帮我规划一下饮食",
+            active_report=self._active_report(),
+            intent_route="general_chat_subgraph",
+        )
+
+        rewritten = await query_rewrite_node(state)
+
+        plan = rewritten["query_context"]["report_load_plan"]
+        self.assertTrue(plan["need_report"])
+        self.assertEqual(6, plan["target_report_id"])
+        self.assertEqual("DIET_ADVICE", plan["target_focus"])
+        self.assertEqual(["feature_summary", "interpretation", "dietary_advice"], plan["sections"])
+
+    async def test_daily_eating_request_with_active_report_loads_diet_sections(self) -> None:
+        state = self._state(
+            "每天怎么吃才能改善",
+            active_report=self._active_report(),
+            intent_route="general_chat_subgraph",
+        )
+
+        rewritten = await query_rewrite_node(state)
+
+        plan = rewritten["query_context"]["report_load_plan"]
+        self.assertTrue(plan["need_report"])
+        self.assertEqual(["feature_summary", "interpretation", "dietary_advice"], plan["sections"])
 
     async def test_health_qa_followup_uses_last_answer_even_with_active_report(self) -> None:
         state = self._state(
@@ -209,6 +249,8 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         routed = await route_node(rewritten)
 
         self.assertEqual("GENERAL_TOPIC", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertFalse(rewritten["query_context"]["report_load_plan"]["need_report"])
+        self.assertEqual([], rewritten["query_context"]["report_load_plan"]["sections"])
         self.assertEqual("health_qa_node", select_next_route(rewritten))
         self.assertEqual("health_qa_subgraph", routed["next_action"]["payload"]["route_target"])
 
@@ -224,6 +266,7 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         routed = await route_node(rewritten)
 
         self.assertEqual("UNKNOWN", rewritten["query_context"]["reference_resolution"]["target_type"])
+        self.assertFalse(rewritten["query_context"]["report_load_plan"]["need_report"])
         self.assertEqual("general_chat_node", select_next_route(rewritten))
         self.assertEqual("general_chat_subgraph", routed["next_action"]["payload"]["route_target"])
 
@@ -286,6 +329,11 @@ class TestQueryRewriteContextRouting(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("LLM_FALLBACK", rewritten["query_context"]["resolution_strategy"])
         self.assertEqual("LAST_ANSWER_ITEM", rewritten["query_context"]["reference_resolution"]["target_type"])
         self.assertEqual("report_followup_subgraph", rewritten["query_context"]["route_hint"])
+        self.assertTrue(rewritten["query_context"]["report_load_plan"]["need_report"])
+        self.assertEqual(
+            ["feature_summary", "interpretation", "risk_disclaimer"],
+            rewritten["query_context"]["report_load_plan"]["sections"],
+        )
 
     async def test_low_confidence_llm_timeout_needs_clarification(self) -> None:
         state = self._state(

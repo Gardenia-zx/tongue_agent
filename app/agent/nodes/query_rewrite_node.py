@@ -40,6 +40,31 @@ FOCUS_GENERAL_DETAIL = "GENERAL_DETAIL"
 FOCUS_FEATURE_EXPLANATION = "FEATURE_EXPLANATION"
 FOCUS_UNKNOWN = "UNKNOWN"
 
+ALLOWED_REPORT_SECTIONS = {
+    "feature_summary",
+    "interpretation",
+    "dietary_advice",
+    "exercise_advice",
+    "lifestyle_advice",
+    "risk_disclaimer",
+    "rag_evidence_summary",
+    "full_report",
+}
+REPORT_SECTIONS_BY_FOCUS = {
+    FOCUS_DIET_ADVICE: ["feature_summary", "interpretation", "dietary_advice"],
+    FOCUS_DETAILED_REPORT: [
+        "full_report",
+        "feature_summary",
+        "interpretation",
+        "dietary_advice",
+        "lifestyle_advice",
+        "risk_disclaimer",
+    ],
+    FOCUS_FEATURE_EXPLANATION: ["feature_summary", "interpretation", "risk_disclaimer"],
+    FOCUS_GENERAL_DETAIL: ["feature_summary", "interpretation", "risk_disclaimer"],
+}
+REPORT_PLAN_TARGETS = {REF_ACTIVE_REPORT, REF_REPORT_ITEM}
+
 ROUTE_REPORT_FOLLOWUP = "report_followup_subgraph"
 ROUTE_HEALTH_QA = "health_qa_subgraph"
 ROUTE_GENERAL_CHAT = "general_chat_subgraph"
@@ -72,11 +97,24 @@ class LLMReferenceResolution(BaseModel):
     evidence_sources: list[str] = Field(default_factory=list)
 
 
+class LLMReportLoadPlan(BaseModel):
+    need_report: bool = False
+    target_report_id: Any = None
+    target_type: str = REF_GENERAL_TOPIC
+    target_focus: str = FOCUS_UNKNOWN
+    sections: list[str] = Field(default_factory=list)
+    raw_user_input: str = ""
+    standalone_query: str = ""
+    reason: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
 class LLMRewriteOutput(BaseModel):
     standalone_query: str
     reference_resolution: LLMReferenceResolution
     route_hint: str | None = None
     rewrite_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    report_load_plan: LLMReportLoadPlan | None = None
 
 QUERY_REWRITE_SYSTEM_PROMPT = """你是中医舌象健康 Agent 的追问消解器。
 你的职责是把依赖上下文的问题改写为独立问题，并解析用户指代的对象。
@@ -531,6 +569,97 @@ def _active_report_id(rewrite_context: dict[str, Any]) -> str | None:
     return str(report_id) if report_id is not None else None
 
 
+def _trusted_active_report(rewrite_context: dict[str, Any]) -> dict[str, Any] | None:
+    active_report = rewrite_context.get("active_report_ref")
+    if not isinstance(active_report, dict):
+        return None
+    report_id = active_report.get("report_id") or active_report.get("id")
+    if report_id is None:
+        return None
+    if active_report.get("trusted") is True or active_report.get("is_current_active_report") is True:
+        return active_report
+    return None
+
+
+def _sections_for_focus(focus: str) -> list[str]:
+    normalized_focus = focus if focus in REPORT_SECTIONS_BY_FOCUS else FOCUS_GENERAL_DETAIL
+    return list(REPORT_SECTIONS_BY_FOCUS[normalized_focus])
+
+
+def _valid_report_sections(sections: list[str]) -> bool:
+    return bool(sections) and all(section in ALLOWED_REPORT_SECTIONS for section in sections)
+
+
+def _target_report_matches_active(target_report_id: Any, trusted_report_id: str | None) -> bool:
+    return (
+        target_report_id is not None
+        and trusted_report_id is not None
+        and str(target_report_id) == trusted_report_id
+    )
+
+
+def _build_report_load_plan(
+    *,
+    raw_text: str,
+    standalone_query: str,
+    reference: dict[str, Any],
+    route_hint: str | None,
+    rewrite_context: dict[str, Any],
+    llm_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    trusted_report = _trusted_active_report(rewrite_context)
+    trusted_report_id = _active_report_id(rewrite_context) if trusted_report else None
+    target_type = str(reference.get("target_type") or REF_UNKNOWN)
+    target_focus = str(reference.get("target_focus") or FOCUS_UNKNOWN)
+    target_report_id = reference.get("target_report_id")
+    if target_report_id is None and target_type in REPORT_PLAN_TARGETS and trusted_report is not None:
+        target_report_id = trusted_report.get("report_id") or trusted_report.get("id")
+
+    route_targets_report = route_hint == ROUTE_REPORT_FOLLOWUP
+    target_is_report = target_type in REPORT_PLAN_TARGETS
+    target_matches_report = _target_report_matches_active(target_report_id, trusted_report_id)
+    llm_wants_report = bool(llm_plan and llm_plan.get("need_report"))
+    should_load_report = target_is_report or (
+        route_targets_report and (target_matches_report or llm_wants_report)
+    )
+
+    base_plan = {
+        "need_report": False,
+        "target_report_id": None,
+        "target_type": target_type,
+        "target_focus": target_focus,
+        "sections": [],
+        "raw_user_input": raw_text,
+        "standalone_query": standalone_query,
+        "reason": "no_report_dependency",
+        "confidence": float(reference.get("confidence") or 0.0),
+    }
+    if not should_load_report:
+        return base_plan
+    if trusted_report is None:
+        return {**base_plan, "reason": "trusted_active_report_ref_missing"}
+    if target_report_id is not None and not target_matches_report:
+        return {**base_plan, "reason": "target_report_id_not_trusted_active_report"}
+
+    sections = _sections_for_focus(target_focus)
+    if llm_plan and llm_plan.get("sections") and _valid_report_sections(llm_plan["sections"]):
+        sections = list(dict.fromkeys(str(section) for section in llm_plan["sections"]))
+    if not _valid_report_sections(sections):
+        sections = _sections_for_focus(FOCUS_GENERAL_DETAIL)
+
+    return {
+        **base_plan,
+        "need_report": True,
+        "target_report_id": trusted_report.get("report_id") or trusted_report.get("id"),
+        "sections": sections,
+        "reason": str((llm_plan or {}).get("reason") or reference.get("reason") or "report_dependency_resolved"),
+        "confidence": min(
+            float(reference.get("confidence") or 0.0),
+            float((llm_plan or {}).get("confidence") or reference.get("confidence") or 0.0),
+        ),
+    }
+
+
 def _ambiguous_reference(reason: str) -> dict[str, Any]:
     return {
         "status": "AMBIGUOUS",
@@ -572,6 +701,20 @@ def _validate_llm_output(
     if target_report_id is not None and str(target_report_id) != trusted_report_id:
         return None
 
+    report_load_plan = None
+    if output.report_load_plan is not None:
+        plan = output.report_load_plan.model_dump(mode="json", exclude_none=True)
+        sections = plan.get("sections") or []
+        if sections and not _valid_report_sections(sections):
+            return None
+        if plan.get("need_report"):
+            if not _trusted_active_report(rewrite_context):
+                return None
+            plan_report_id = plan.get("target_report_id")
+            if plan_report_id is not None and str(plan_report_id) != trusted_report_id:
+                return None
+        report_load_plan = plan
+
     reference["confidence"] = min(
         float(reference.get("confidence") or 0.0),
         float(output.rewrite_confidence or 0.0),
@@ -581,6 +724,7 @@ def _validate_llm_output(
         "reference_resolution": reference,
         "route_hint": output.route_hint,
         "rewrite_confidence": float(output.rewrite_confidence or 0.0),
+        "report_load_plan": report_load_plan,
     }
 
 
@@ -618,6 +762,8 @@ def _llm_prompt_payload(
         "allowed_reference_target_types": sorted(REFERENCE_TARGET_TYPES),
         "allowed_route_hints": sorted(ALLOWED_ROUTE_HINTS),
         "allowed_evidence_sources": sorted(EVIDENCE_SOURCES),
+        "allowed_report_sections": sorted(ALLOWED_REPORT_SECTIONS),
+        "report_sections_by_focus": REPORT_SECTIONS_BY_FOCUS,
         "context": {
             "recent_messages": rewrite_context.get("recent_messages") or [],
             "last_final_answer": rewrite_context.get("last_final_answer"),
@@ -639,6 +785,17 @@ def _llm_prompt_payload(
                 "target_report_id": "trusted active report id or null",
                 "evidence_sources": "allowed evidence source names only",
                 "reason": "short string",
+            },
+            "report_load_plan": {
+                "need_report": "boolean",
+                "target_report_id": "trusted active report id or null",
+                "target_type": "same meaning as reference_resolution.target_type",
+                "target_focus": "DIET_ADVICE | DETAILED_REPORT | FEATURE_EXPLANATION | GENERAL_DETAIL | UNKNOWN",
+                "sections": "array of allowed_report_sections only",
+                "raw_user_input": "string",
+                "standalone_query": "string",
+                "reason": "short string",
+                "confidence": "0..1",
             },
         },
     }
@@ -779,7 +936,15 @@ async def query_rewrite_node(state: AgentState) -> AgentState:
             last_answer=last_answer if isinstance(last_answer, dict) else None,
             active_report=active_report if isinstance(active_report, dict) else None,
         )
-    # 路由建议
+    safe_route_hint = route_hint if route_hint in ALLOWED_ROUTE_HINTS else None
+    report_load_plan = _build_report_load_plan(
+        raw_text=raw_text,
+        standalone_query=standalone_query,
+        reference=reference,
+        route_hint=safe_route_hint,
+        rewrite_context=rewrite_context,
+        llm_plan=llm_result.get("report_load_plan") if llm_result else None,
+    )
 
 
     # 重写后的查询字典
@@ -790,8 +955,9 @@ async def query_rewrite_node(state: AgentState) -> AgentState:
         "raw_user_input": raw_text,
         "standalone_query": standalone_query,
         "reference_resolution": reference,
+        "report_load_plan": report_load_plan,
         "clarification_status": clarification_status,
-        "route_hint": route_hint if route_hint in ALLOWED_ROUTE_HINTS else None,
+        "route_hint": safe_route_hint,
         "rewrite_confidence": float(reference.get("confidence") or 0.0),
         "rule_confidence": float(rule_reference.get("rule_confidence") or 0.0),
         "resolution_strategy": (

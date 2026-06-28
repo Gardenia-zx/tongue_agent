@@ -187,6 +187,34 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
             routed["next_action"]["payload"]["route_target"],
         )
 
+    async def test_followup_uses_trusted_report_ref_when_sections_unavailable(self) -> None:
+        from app.agent.nodes.report_followup_node import generate_report_followup_reply
+
+        state = self._context_bundle_followup_state()
+        state["message"]["content"] = "帮我规划一下饮食习惯改善一下"
+        state["current_turn"]["business_context"] = {
+            "active_report_ref": state["context_bundle"]["active_report_ref"],
+            "report_context_error": {"status": "FAILED", "reason": "CONFIG_ERROR"},
+        }
+        rag_result = {
+            "answer": "饮食宜清淡规律，少生冷甜腻。",
+            "hits": [],
+            "grounded": True,
+        }
+
+        with patch(
+            "app.agent.nodes.report_followup_node.answer_with_rag",
+            AsyncMock(return_value=rag_result),
+        ), patch(
+            "app.agent.nodes.report_followup_node.get_chat_model_client",
+        ) as mocked_client:
+            mocked_client.return_value.generate = AsyncMock(return_value="不是 JSON")
+            content, _, structured_content = await generate_report_followup_reply(state)
+
+        self.assertNotIn("暂时无法读取当前舌象报告内容", content)
+        self.assertIn("饮食建议", content)
+        self.assertEqual("REPORT_FOLLOWUP", structured_content["answer_type"])
+
     async def test_report_followup_fetches_rag_for_diet_question(self) -> None:
         from app.agent.nodes.report_followup_node import generate_report_followup_reply
 
