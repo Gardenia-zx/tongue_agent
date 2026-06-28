@@ -108,6 +108,10 @@ class TestTongueReportNode(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(draft_report["rag_evidence"][0]["chunk_id"], "c1")
         self.assertIn("白苔", draft_report["feature_summary"])
         self.assertIn("白苔", draft_report["health_notes"][0])
+        self.assertTrue(draft_report["dietary_advice"])
+        self.assertTrue(draft_report["exercise_advice"])
+        self.assertTrue(draft_report["lifestyle_advice"])
+        self.assertNotIn("舌苔是", " ".join(draft_report["lifestyle_advice"]))
         self.assertIn("structured_sections", draft_report["metadata"])
         self.assertEqual(
             "TONGUE_REPORT",

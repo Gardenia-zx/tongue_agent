@@ -25,6 +25,13 @@ class ReportRagEvidence(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReportEvidenceRef(BaseModel):
+    doc_id: str | None = None
+    chunk_id: str | None = None
+    title: str | None = None
+    final_score: float | None = None
+
+
 class TongueAnalysisReport(BaseModel):
     schema_version: str = "1.0"
     report_type: Literal["tongue_analysis_mvp"] = "tongue_analysis_mvp"
@@ -40,6 +47,26 @@ class TongueAnalysisReport(BaseModel):
     rag_query: str = ""
     rag_grounded: bool = False
     rag_evidence: list[ReportRagEvidence] = Field(default_factory=list)
+    evidence_refs: list[ReportEvidenceRef] = Field(default_factory=list)
+    comprehensive_summary: str = Field(default="", description="面向用户的综合摘要，不能替代诊断。")
+    tongue_features: list[dict[str, Any]] = Field(default_factory=list)
+    health_interpretation: str = Field(default="", description="舌象特征的健康管理解释，不能诊断。")
+    dietary_advice: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+        description="饮食建议，只能包含饮食、饮水、进食习惯相关内容。",
+    )
+    exercise_advice: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+        description="运动建议，只能包含运动方式、强度、频率和恢复观察相关内容。",
+    )
+    lifestyle_advice: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+        description="生活方式建议，只能包含作息、口腔清洁、拍摄复查习惯等内容，不能写舌苔观察问题。",
+    )
+    risk_tips: list[str] = Field(default_factory=list, max_length=2)
     summary: str
     health_notes: list[str] = Field(default_factory=list)
     risk_disclaimer: str = (

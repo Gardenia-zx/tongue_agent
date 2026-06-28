@@ -6,6 +6,7 @@ from app.agent.nodes.rag_node_utils import answer_with_rag, fallback_rag_respons
 from app.agent.state import AgentState
 from app.core.config import get_settings
 from app.schemas.report import (
+    ReportEvidenceRef,
     ReportImageInfo,
     ReportRagEvidence,
     TongueAnalysisReport,
@@ -220,6 +221,49 @@ def _build_rag_evidence(rag_context: dict[str, Any]) -> list[ReportRagEvidence]:
     return evidence
 
 
+def _build_evidence_refs(rag_context: dict[str, Any]) -> list[ReportEvidenceRef]:
+    refs: list[ReportEvidenceRef] = []
+    for hit in rag_context.get("hits") or []:
+        if not isinstance(hit, dict):
+            continue
+        refs.append(
+            ReportEvidenceRef(
+                doc_id=hit.get("doc_id"),
+                chunk_id=str(hit.get("chunk_id") or ""),
+                title=hit.get("title"),
+                final_score=float(hit.get("final_score") or 0.0),
+            )
+        )
+    return refs
+
+
+def _build_tongue_feature_dicts(tongue_features: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            code = value.get("code")
+            if isinstance(code, str) and code not in seen:
+                items.append(
+                    {
+                        "code": code,
+                        "name": value.get("name"),
+                        "status": value.get("status") or "DETECTED",
+                        "confidence": value.get("confidence"),
+                    }
+                )
+                seen.add(code)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(tongue_features)
+    return items
+
+
 def _build_health_notes(feature_names: list[str]) -> list[str]:
     notes = [
         "舌象观察容易受到拍摄光线、饮食、口腔清洁和近期作息影响。",
@@ -289,6 +333,30 @@ def _build_health_suggestions(feature_names: list[str]) -> list[str]:
     return suggestions
 
 
+def _build_dietary_advice(feature_names: list[str]) -> list[str]:
+    suggestions = [
+        "饮食保持清淡规律，少吃过油、过甜、辛辣、生冷和饮酒刺激。",
+        "观察进食后腹胀、口腻、大便、食欲变化，记录与舌象变化的关系。",
+    ]
+    if _has_feature(feature_names, ["白苔", "苔白"]):
+        suggestions.insert(0, "如果只是薄白而润，饮食上保持规律即可，不需要因为“白苔”本身过度紧张。")
+    return suggestions
+
+
+def _build_exercise_advice(feature_names: list[str]) -> list[str]:
+    return [
+        "选择中等强度、可长期坚持的运动，如快走、八段锦、拉伸或轻力量训练。",
+        "运动后关注疲劳、睡眠和恢复情况，避免短期突然增加强度。",
+    ]
+
+
+def _build_lifestyle_advice(feature_names: list[str]) -> list[str]:
+    return [
+        "保持规律作息，尽量避免连续熬夜。",
+        "保持口腔清洁，复拍时尽量使用自然光、相似角度和相似时间。",
+    ]
+
+
 def _build_knowledge_reference_note(rag_context: dict[str, Any]) -> str:
     hit_count = len(rag_context.get("hits") or [])
     if hit_count <= 0:
@@ -352,12 +420,19 @@ REPORT_SYNTHESIS_SYSTEM_PROMPT = """你是中医舌象健康管理系统的报�
 - RAG 资料不足时，可以保守表达，但仍要给出下一步观察建议。
 - 不要解释你是如何推理的，不要使用“综合理解”“核心关联”“证据显示”“根据知识库”等过程型表达。
 - 不要输出 Markdown，不要输出标题符号，不要输出分隔线，不要输出项目符号。
-- 必须只返回 JSON，不要返回额外文字。
+- 必须一次性返回完整结构化 JSON，不要返回额外文字，不要省略任何字段。
+- dietary_advice、exercise_advice、lifestyle_advice 每个字段必须返回 2 到 4 条。
+- 饮食建议只写饮食、饮水、进食习惯；运动建议只写运动方式、强度、频率和恢复；生活方式只写作息、口腔清洁、复拍习惯。
+- 舌苔厚薄、润滑干腻、腹胀食欲等“需要继续观察的问题”只能放入 observation，不要放入 dietary_advice、exercise_advice 或 lifestyle_advice。
+- 三类建议都必须是可执行建议，不要写成疑问句。
 
 JSON 格式：
 {
   "result_summary": "直接给用户看的结果，4 到 6 句话。要说明已识别特征、可能相关的生活/身体状态、仍需补充的信息和观察边界，但不能诊断。",
-  "daily_care": ["用户接下来可以做的生活方式建议，最多 6 条，必要时可包含药物/方剂一般参考、禁忌和就医沟通要点"],
+  "health_interpretation": "对本次舌象特征的健康管理解释，不能诊断。",
+  "dietary_advice": ["饮食建议，最多 4 条，只写饮食相关内容"],
+  "exercise_advice": ["运动建议，最多 4 条，只写运动强度、方式和恢复观察"],
+  "lifestyle_advice": ["生活方式建议，最多 4 条，只写作息、口腔清洁、复拍习惯等内容"],
   "observation": ["接下来需要观察或复拍确认的变化，最多 6 条"],
   "risk_reminder": "一句安全提醒"
 }
@@ -421,15 +496,29 @@ def _compose_user_facing_report(
     user_description: str,
 ) -> tuple[str, dict[str, Any]] | None:
     result_summary = _clean_text(payload.get("result_summary"), max_length=700)
-    daily_care = _clean_items(payload.get("daily_care"), max_items=6)
     observation = _clean_items(payload.get("observation"), max_items=6)
     risk_reminder = _clean_text(payload.get("risk_reminder"), max_length=220)
+    health_interpretation = _clean_text(payload.get("health_interpretation"), max_length=600)
+    dietary_advice = _clean_items(payload.get("dietary_advice"), max_items=4)
+    exercise_advice = _clean_items(payload.get("exercise_advice"), max_items=4)
+    lifestyle_advice = _clean_items(payload.get("lifestyle_advice"), max_items=4)
 
-    if not result_summary:
+    if not result_summary or not dietary_advice or not exercise_advice or not lifestyle_advice:
         return None
 
-    if not daily_care:
-        daily_care = _build_health_suggestions(feature_names)[:6]
+    if not health_interpretation:
+        health_interpretation = _build_general_interpretation(feature_names)
+
+    if not dietary_advice:
+        dietary_advice = _build_dietary_advice(feature_names)
+
+    if not exercise_advice:
+        exercise_advice = _build_exercise_advice(feature_names)
+
+    if not lifestyle_advice:
+        lifestyle_advice = _build_lifestyle_advice(feature_names)
+
+    daily_care = (dietary_advice + exercise_advice + lifestyle_advice)[:6]
 
     if not observation:
         observation = _build_observation_points(feature_names)[:6]
@@ -447,6 +536,17 @@ def _compose_user_facing_report(
         risk_reminder=risk_reminder,
         feature_names=feature_names,
         user_description=user_description,
+    )
+    structured_answer.update(
+        {
+            "comprehensive_summary": result_summary,
+            "health_interpretation": health_interpretation,
+            "dietary_advice": dietary_advice,
+            "exercise_advice": exercise_advice,
+            "lifestyle_advice": lifestyle_advice,
+            "risk_tips": [risk_reminder],
+            "observation_points": observation,
+        }
     )
 
     sections = [
@@ -588,7 +688,7 @@ def _compose_report_answer(
         "本次结果\n"
         f"{result_summary}\n\n"
         "建议\n"
-        f"{_format_numbered(_build_health_suggestions(feature_names))}\n\n"
+        f"{_format_numbered((_build_dietary_advice(feature_names) + _build_exercise_advice(feature_names) + _build_lifestyle_advice(feature_names))[:6])}\n\n"
         "接下来观察\n"
         f"{_format_numbered(_build_observation_points(feature_names))}\n\n"
         "提醒\n"
@@ -611,14 +711,30 @@ def _build_template_structured_report_answer(
     else:
         summary = f"本次图片主要识别到：{feature_text}。这些内容适合作为一般健康管理参考。"
 
-    return _build_structured_report_answer(
+    dietary_advice = _build_dietary_advice(feature_names)
+    exercise_advice = _build_exercise_advice(feature_names)
+    lifestyle_advice = _build_lifestyle_advice(feature_names)
+    risk_reminder = "以上内容用于一般健康知识说明和健康管理参考，不能替代医生诊断。"
+    answer = _build_structured_report_answer(
         result_summary=summary,
-        daily_care=_build_health_suggestions(feature_names)[:4],
+        daily_care=(dietary_advice + exercise_advice + lifestyle_advice)[:6],
         observation=_build_observation_points(feature_names)[:4],
-        risk_reminder="以上内容用于一般健康知识说明和健康管理参考，不能替代医生诊断。",
+        risk_reminder=risk_reminder,
         feature_names=feature_names,
         user_description=user_description,
     )
+    answer.update(
+        {
+            "comprehensive_summary": summary,
+            "health_interpretation": _build_general_interpretation(feature_names),
+            "dietary_advice": dietary_advice,
+            "exercise_advice": exercise_advice,
+            "lifestyle_advice": lifestyle_advice,
+            "risk_tips": [risk_reminder],
+            "observation_points": _build_observation_points(feature_names)[:4],
+        }
+    )
+    return answer
 
 
 def _build_tongue_analysis_report(
@@ -633,6 +749,28 @@ def _build_tongue_analysis_report(
     content: str,
     structured_answer: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    structured = structured_answer or {}
+    comprehensive_summary = (
+        _clean_text(structured.get("comprehensive_summary"), max_length=900)
+        or _clean_text(structured.get("summary"), max_length=900)
+        or content
+    )
+    health_interpretation = (
+        _clean_text(structured.get("health_interpretation"), max_length=600)
+        or _build_general_interpretation(feature_names)
+    )
+    dietary_advice = _clean_items(structured.get("dietary_advice"), max_items=4) or _build_dietary_advice(feature_names)
+    exercise_advice = _clean_items(structured.get("exercise_advice"), max_items=4) or _build_exercise_advice(feature_names)
+    lifestyle_advice = _clean_items(structured.get("lifestyle_advice"), max_items=4) or _build_lifestyle_advice(feature_names)
+    risk_tips = _clean_items(structured.get("risk_tips"), max_items=2)
+    if not risk_tips:
+        risk_tip = (
+            _clean_text(structured.get("risk_reminder"), max_length=220)
+            or _clean_text(structured.get("disclaimer"), max_length=220)
+            or "以上内容用于一般健康知识说明和健康管理参考，不能替代医生诊断。"
+        )
+        risk_tips = [risk_tip]
+
     report = TongueAnalysisReport(
         report_status="FINAL",
         report_id=state.get("report_id"),
@@ -646,6 +784,14 @@ def _build_tongue_analysis_report(
         rag_query=rag_query,
         rag_grounded=bool(rag_context.get("grounded")),
         rag_evidence=_build_rag_evidence(rag_context),
+        evidence_refs=_build_evidence_refs(rag_context),
+        comprehensive_summary=comprehensive_summary,
+        tongue_features=_build_tongue_feature_dicts(tongue_features),
+        health_interpretation=health_interpretation,
+        dietary_advice=dietary_advice,
+        exercise_advice=exercise_advice,
+        lifestyle_advice=lifestyle_advice,
+        risk_tips=risk_tips,
         summary=content,
         health_notes=_build_health_notes(feature_names),
         versions={
@@ -675,6 +821,9 @@ def _build_tongue_analysis_report(
                 ),
                 "observation_points": _build_observation_points(feature_names),
                 "health_suggestions": _build_health_suggestions(feature_names),
+                "dietary_advice": dietary_advice,
+                "exercise_advice": exercise_advice,
+                "lifestyle_advice": lifestyle_advice,
                 "knowledge_reference_note": _build_knowledge_reference_note(
                     rag_context
                 ),

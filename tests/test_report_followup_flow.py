@@ -276,6 +276,31 @@ class TestReportFollowupFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("饮食建议", structured_content["sections"][0]["title"])
         self.assertNotEqual("可以重点看", structured_content["sections"][0]["title"])
 
+    async def test_diet_and_exercise_followup_includes_daily_exercise(self) -> None:
+        from app.agent.nodes.report_followup_node import generate_report_followup_reply
+
+        state = self._context_bundle_followup_state()
+        state["message"]["content"] = "报告不够详细，我需要饮食推荐和运动推荐"
+        rag_result = {
+            "answer": "饮食宜清淡规律，运动宜循序渐进。",
+            "hits": [{"chunk_id": "c1", "content": "测试依据"}],
+            "grounded": True,
+        }
+
+        with patch(
+            "app.agent.nodes.report_followup_node.answer_with_rag",
+            AsyncMock(return_value=rag_result),
+        ), patch(
+            "app.agent.nodes.report_followup_node.get_chat_model_client",
+        ) as mocked_client:
+            mocked_client.return_value.generate = AsyncMock(return_value="不是 JSON")
+            content, _, structured_content = await generate_report_followup_reply(state)
+
+        titles = [section["title"] for section in structured_content["sections"]]
+        self.assertIn("饮食建议", titles)
+        self.assertIn("每日运动建议", titles)
+        self.assertIn("每日运动建议", content)
+
     async def test_short_followup_after_diet_answer_keeps_diet_structure(self) -> None:
         from app.agent.nodes.query_rewrite_node import query_rewrite_node
         from app.agent.nodes.report_followup_node import generate_report_followup_reply

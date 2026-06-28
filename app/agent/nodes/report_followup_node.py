@@ -28,7 +28,9 @@ FOLLOWUP_REPORT_PROMPT = """你是舌象健康报告的追问助手。
 8. 不要输出 Markdown 标题符号，不要输出分隔线。
 9. 如果提供了 rag_context，要结合知识库检索结果给出一般健康管理参考。
 10. 如果用户要求“更详细的报告、完整报告、重新生成详细报告”，要输出一份完整的舌象健康参考报告，不要只给几个观察点。
-11. 返回 JSON：
+11. content 只写 1 到 3 句摘要，详细内容只放在 structured_content.sections，避免重复输出。
+12. 如果用户要求饮食推荐、运动推荐或详细建议，sections 必须包含“饮食建议”和“每日运动建议”。
+13. 返回 JSON：
 {
   "content": "给用户看的中文回答",
   "structured_content": {
@@ -41,7 +43,8 @@ FOLLOWUP_REPORT_PROMPT = """你是舌象健康报告的追问助手。
       {"title": "识别结果", "items": ["基于本轮已加载报告章节的图像识别结果"]},
       {"title": "舌象说明", "content": "解释舌象特征的一般健康含义"},
       {"title": "可能相关表现", "items": ["结合用户描述和最近消息"]},
-      {"title": "健康管理建议", "items": ["最多 5 条，必要时包含药物/方剂一般参考和禁忌提醒"]},
+      {"title": "饮食建议", "items": ["最多 5 条，写具体吃法和忌口"]},
+      {"title": "每日运动建议", "items": ["最多 5 条，写每天或每周怎么运动、强度和注意事项"]},
       {"title": "继续观察", "items": ["最多 5 条"]}
     ],
     "disclaimer": "安全提醒"
@@ -200,6 +203,11 @@ def needs_report_followup_rag(text: str) -> bool:
         "推荐",
         "建议",
         "调理",
+        "运动",
+        "锻炼",
+        "快走",
+        "跑步",
+        "健身",
         "注意",
         "怎么办",
     ]
@@ -236,8 +244,31 @@ def is_diet_or_care_followup(text: str) -> bool:
         "推荐",
         "建议",
         "调理",
+        "运动",
+        "锻炼",
+        "快走",
+        "跑步",
+        "健身",
     ]
     return any(keyword in compact for keyword in keywords)
+
+
+def wants_exercise_advice(text: str) -> bool:
+    compact = "".join(text.split())
+    return any(keyword in compact for keyword in ("运动", "锻炼", "快走", "跑步", "健身", "活动"))
+
+
+def _exercise_section() -> dict[str, Any]:
+    return {
+        "title": "每日运动建议",
+        "items": [
+            "每天安排 20 到 30 分钟轻到中等强度运动，如快走、八段锦、拉伸或轻力量训练。",
+            "以微微出汗、呼吸略加快但还能说话为度，不追求一次性高强度。",
+            "饭后不要立刻剧烈运动，可在饭后 30 分钟左右散步 10 到 15 分钟。",
+            "每周保持 3 到 5 次规律运动；如果当天疲乏、睡眠差，就降低强度或改为拉伸。",
+            "运动后观察睡眠、疲劳、腹胀和食欲变化，连续记录比单次感受更有参考价值。",
+        ],
+    }
 
 
 def build_followup_rag_query(
@@ -268,7 +299,7 @@ def build_followup_rag_query(
     if is_detailed_report_request(user_text):
         parts.append("中医 舌象 详细报告 舌苔 舌质 健康管理 继续观察")
     else:
-        parts.append("中医 舌象 饮食 健康管理 一般建议")
+        parts.append("中医 舌象 饮食 运动 健康管理 一般建议")
     return " ".join(part for part in parts if part).strip()
 
 
@@ -312,6 +343,7 @@ def _build_detailed_report_sections(
                 "不要仅凭舌象自行用药、停药或调整治疗方案。",
             ],
         },
+        _exercise_section(),
         {
             "title": "继续观察",
             "items": [
@@ -380,6 +412,12 @@ def compose_followup_fallback(
             "2. 三餐尽量规律，晚餐不要过饱，饭后避免马上久坐或躺下。\n"
             "3. 可以选择相对温和、容易消化的食物，例如粥、面、山药、白扁豆、南瓜等日常食材。\n"
             "4. 如果你本身有基础疾病、孕期、正在用药，或不适持续加重，不建议自行调理，应咨询医生。\n\n"
+            "每日运动建议\n"
+            "1. 每天安排 20 到 30 分钟轻到中等强度运动，如快走、八段锦、拉伸或轻力量训练。\n"
+            "2. 以微微出汗、呼吸略加快但还能说话为度，不追求一次性高强度。\n"
+            "3. 饭后不要立刻剧烈运动，可在饭后 30 分钟左右散步 10 到 15 分钟。\n"
+            "4. 每周保持 3 到 5 次规律运动；如果当天疲乏、睡眠差，就降低强度或改为拉伸。\n"
+            "5. 运动后观察睡眠、疲劳、腹胀和食欲变化，连续记录比单次感受更有参考价值。\n\n"
             "继续观察\n"
             "1. 舌苔是薄白还是厚白，是否发腻或发滑。\n"
             "2. 饭后腹胀、食欲、大便状态和疲乏感是否随饮食变化而改善。\n"
@@ -468,6 +506,9 @@ def normalize_structured_followup(
             if len(sections) >= (6 if detailed_report else 3):
                 break
 
+    if sections and wants_exercise_advice(user_text) and not any("运动" in str(section.get("title") or "") for section in sections):
+        sections.append(_exercise_section())
+
     if not sections and detailed_report:
         report_summary = ""
         feature_summary = ""
@@ -496,6 +537,10 @@ def normalize_structured_followup(
                     "如果不适持续加重，或有基础疾病、孕期、正在用药，应咨询医生。",
                 ],
             },
+        ]
+        if wants_exercise_advice(user_text):
+            sections.append(_exercise_section())
+        sections.append(
             {
                 "title": "继续观察",
                 "items": [
@@ -504,7 +549,7 @@ def normalize_structured_followup(
                     "同一光线下复拍舌象，看白苔范围和厚薄是否持续。",
                 ],
             },
-        ]
+        )
 
     if not sections:
         sections = [

@@ -4,6 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
+from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.locks import LockBusyError, redis_lock
@@ -19,6 +20,46 @@ from app.schemas.agent import (
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+class ReportCompareExplanationRequest(BaseModel):
+    base_report_id: int | None = None
+    target_report_id: int | None = None
+    added: list[dict[str, Any]] = Field(default_factory=list)
+    removed: list[dict[str, Any]] = Field(default_factory=list)
+    persistent: list[dict[str, Any]] = Field(default_factory=list)
+    changed: list[dict[str, Any]] = Field(default_factory=list)
+    unsupported: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ReportCompareExplanationResponse(BaseModel):
+    status: str = "COMPLETED"
+    explanation: str
+    observation_suggestions: list[str] = Field(default_factory=list)
+
+
+@router.post("/report-compare", response_model=ReportCompareExplanationResponse)
+async def explain_report_compare(
+    request: ReportCompareExplanationRequest,
+) -> ReportCompareExplanationResponse:
+    explanation = (
+        f"对比报告 {request.base_report_id} 与报告 {request.target_report_id}："
+        f"新增 {len(request.added)} 项、消失 {len(request.removed)} 项、"
+        f"持续 {len(request.persistent)} 项、置信度变化 {len(request.changed)} 项。"
+        "结果用于日常健康观察，不作为诊断结论。"
+    )
+    suggestions = [
+        "后续拍摄尽量保持相似的光线、角度和时间。",
+        "重点观察新增、消失或置信度持续变化的特征。",
+    ]
+    if request.removed:
+        suggestions.append("消失的特征建议通过下一次相似条件下复拍确认。")
+    if request.changed:
+        suggestions.append("置信度变化需要结合连续多次报告一起看，单次波动不宜过度解读。")
+    return ReportCompareExplanationResponse(
+        explanation=explanation,
+        observation_suggestions=suggestions,
+    )
 
 
 def _initial_state(request: AgentRunRequest) -> dict[str, Any]:
