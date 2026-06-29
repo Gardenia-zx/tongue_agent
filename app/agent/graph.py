@@ -12,6 +12,8 @@ from app.agent.nodes.query_rewrite_node import query_rewrite_node
 from app.agent.nodes.report_context_resolver_node import report_context_resolver_node
 from app.agent.nodes.report_followup_node import report_followup_node
 from app.agent.nodes.safety_node import safety_node
+from app.agent.nodes.tongue_analysis_node import tongue_analysis_node
+from app.agent.nodes.tongue_report_strategy_node import tongue_report_strategy_node
 from app.agent.runtime import build_agent_runtime_subgraph
 from app.agent.state import AgentState
 from app.agent.turn_lifecycle import (
@@ -22,7 +24,6 @@ from app.agent.turn_lifecycle import (
 
 
 AGENT_RUNTIME_RECURSION_LIMIT = 64
-
 
 
 def build_agent_graph():
@@ -46,6 +47,8 @@ def build_agent_graph():
     graph.add_node("final_context_builder_node", final_context_builder_node)
     graph.add_node("runtime_context_policy_node", runtime_context_policy_node)
     graph.add_node("agent_runtime_subgraph", agent_runtime_subgraph)
+    graph.add_node("tongue_analysis_node", tongue_analysis_node)
+    graph.add_node("tongue_report_node", tongue_report_strategy_node)
     graph.add_node("general_chat_node", general_chat_node)
     graph.add_node("health_qa_node", health_qa_node)
     graph.add_node("privacy_request_node", privacy_request_node)
@@ -68,8 +71,23 @@ def build_agent_graph():
             "safety_node": "safety_node",
             "general_chat_node": "general_chat_node",
             "agent_loop_node": "memory_recall_node",
+            "tongue_analysis_node": "tongue_analysis_node",
         },
     )
+
+    # Requests created by /api/tongue/analyze carry a validated image path or URL.
+    # They use a deterministic image -> report path instead of relying on
+    # tool_choice=auto, which previously allowed the planner to answer without
+    # invoking the image model.
+    graph.add_conditional_edges(
+        "tongue_analysis_node",
+        select_tongue_analysis_next,
+        {
+            "tongue_report_node": "tongue_report_node",
+            "final_response_guard_node": "final_response_guard_node",
+        },
+    )
+    graph.add_edge("tongue_report_node", "final_response_guard_node")
 
     graph.add_edge("memory_recall_node", "report_context_resolver_node")
     graph.add_edge("report_context_resolver_node", "final_context_builder_node")
@@ -93,14 +111,12 @@ def build_agent_graph():
     return graph
 
 
-
 def compile_agent_graph(*, checkpointer, store):
     return build_agent_graph().compile(checkpointer=checkpointer, store=store)
-
 
 
 def select_tongue_analysis_next(state: AgentState) -> str:
     next_action = state.get("next_action") or {}
     if next_action.get("type") == "TONGUE_FEATURES_READY":
         return "tongue_report_node"
-    return "memory_commit_node"
+    return "final_response_guard_node"
