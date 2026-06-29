@@ -123,6 +123,7 @@ async def tongue_analysis_node(state: AgentState) -> AgentState:
             "next_action": {
                 "type": "START_OR_RESUME_TONGUE_ANALYSIS",
                 "payload": {
+                    "status": "WAIT_USER_ANSWER",
                     "report_id": state.get("report_id"),
                     "task_id": state.get("task_id"),
                     "thread_id": state.get("thread_id"),
@@ -159,6 +160,7 @@ async def tongue_analysis_node(state: AgentState) -> AgentState:
         "next_action": {
             "type": "TONGUE_FEATURES_READY",
             "payload": {
+                "status": "COMPLETED",
                 "report_id": state.get("report_id"),
                 "task_id": state.get("task_id"),
                 "thread_id": state.get("thread_id"),
