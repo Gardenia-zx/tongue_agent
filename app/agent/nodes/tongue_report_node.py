@@ -46,6 +46,41 @@ DEFAULT_DIMENSION_VALUES = {
     "coating.texture": "不腻",
     "regions": "未见明显局部异常",
 }
+STATE_SNAPSHOT_LABELS = {
+    "sleep_status": {
+        "NORMAL": "睡眠正常，醒后精神较好",
+        "SHORT": "睡眠时间偏短",
+        "DIFFICULT_OR_WAKE": "入睡困难或容易夜醒",
+        "IRREGULAR_LATE": "经常熬夜，作息不规律",
+    },
+    "digestion_status": {
+        "NORMAL": "胃口和消化基本正常",
+        "POOR_APPETITE": "食欲偏差",
+        "BLOATING": "饭后容易腹胀",
+        "GREASY_REFLUX_DISCOMFORT": "容易口腻、反酸或不舒服",
+    },
+    "bowel_status": {
+        "NORMAL": "排便基本正常",
+        "DRY_CONSTIPATION": "偏干或排便困难",
+        "LOOSE_DIARRHEA": "偏稀或容易腹泻",
+        "STICKY_INCOMPLETE": "大便黏滞或感觉排不干净",
+    },
+    "current_states": {
+        "NORMAL": "精神状态正常",
+        "FATIGUE": "容易疲乏",
+        "STRESS_ANXIETY": "压力较大或容易焦虑",
+        "COLD_SENSITIVE": "容易怕冷",
+        "HEAT_DRY_MOUTH": "容易燥热或口干",
+    },
+    "health_goals": {
+        "DIET_DIGESTION": "饮食和消化",
+        "SLEEP_ROUTINE": "睡眠和作息",
+        "FITNESS": "运动和体能",
+        "FATIGUE_ENERGY": "疲劳和精神状态",
+        "WEIGHT_MANAGEMENT": "体重管理",
+        "UNDERSTAND_TONGUE": "了解本次舌象",
+    },
+}
 FEATURE_VALUE_BY_CODE = {
     "coating.color.white": "白色",
     "coating.color.yellow": "黄色",
@@ -149,19 +184,99 @@ def _extract_user_description(state: AgentState) -> str:
     return ""
 
 
-def _build_augmented_rag_query(feature_query: str, user_description: str) -> str:
+def _extract_state_snapshot(state: AgentState) -> dict[str, Any]:
+    client_context = state.get("client_context") or {}
+    extra = client_context.get("extra") or {}
+    if not isinstance(extra, dict):
+        return {}
+    snapshot = extra.get("state_snapshot")
+    if not isinstance(snapshot, dict):
+        return {}
+
+    def _string(key: str) -> str:
+        value = snapshot.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    def _list(key: str) -> list[str]:
+        value = snapshot.get(key)
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    return {
+        "observation_window": _string("observation_window") or "LAST_3_DAYS",
+        "sleep_status": _string("sleep_status"),
+        "digestion_status": _string("digestion_status"),
+        "bowel_status": _string("bowel_status"),
+        "current_states": _list("current_states"),
+        "health_goals": _list("health_goals"),
+        "free_description": _string("free_description")[:500],
+        "skipped": bool(snapshot.get("skipped")),
+    }
+
+
+def _state_label(group: str, code: str) -> str:
+    return STATE_SNAPSHOT_LABELS.get(group, {}).get(code, code)
+
+
+def _personalization_signals(state_snapshot: dict[str, Any]) -> list[str]:
+    if not state_snapshot:
+        return []
+    if state_snapshot.get("skipped"):
+        return ["用户跳过了近3天状态补充，个性化信息不足"]
+
+    signals: list[str] = []
+    for key in ("sleep_status", "digestion_status", "bowel_status"):
+        code = state_snapshot.get(key)
+        if isinstance(code, str) and code:
+            signals.append(_state_label(key, code))
+
+    for key in ("current_states", "health_goals"):
+        values = state_snapshot.get(key)
+        if isinstance(values, list):
+            for code in values:
+                if isinstance(code, str) and code:
+                    signals.append(_state_label(key, code))
+
+    free_description = state_snapshot.get("free_description")
+    if isinstance(free_description, str) and free_description.strip():
+        signals.append(f"自由补充：{free_description.strip()[:160]}")
+
+    deduped: list[str] = []
+    for signal in signals:
+        if signal not in deduped:
+            deduped.append(signal)
+    return deduped
+
+
+def _state_snapshot_rag_terms(state_snapshot: dict[str, Any]) -> str:
+    if not state_snapshot or state_snapshot.get("skipped"):
+        return ""
+    terms: list[str] = []
+    for signal in _personalization_signals(state_snapshot):
+        if "正常" not in signal:
+            terms.append(signal)
+    return " ".join(terms)[:260]
+
+
+def _build_augmented_rag_query(
+    feature_query: str,
+    user_description: str,
+    state_snapshot: dict[str, Any] | None = None,
+) -> str:
     feature_query = feature_query.strip()
     user_description = user_description.strip()
     inferred_terms = _infer_query_terms_from_description(user_description)
     inferred_text = " ".join(inferred_terms)
+    state_terms = _state_snapshot_rag_terms(state_snapshot or {})
     if not user_description:
-        return f"{feature_query} {inferred_text}".strip()
+        return f"{feature_query} {inferred_text} {state_terms}".strip()
 
     user_query = user_description[:160]
     if not feature_query:
-        return f"{user_query} {inferred_text} 舌象观察 一般健康知识".strip()
+        return f"{user_query} {inferred_text} {state_terms} 舌象观察 一般健康知识".strip()
 
-    return f"{feature_query} {user_query} {inferred_text} 舌象观察 一般健康知识".strip()
+    return f"{feature_query} {user_query} {inferred_text} {state_terms} 舌象观察 一般健康知识".strip()
 
 
 def _build_feature_name_rag_query(feature_names: list[str]) -> str:
@@ -430,6 +545,8 @@ def _build_report_generation_context(
     rag_context: dict[str, Any],
     rag_query: str,
     user_description: str,
+    state_snapshot: dict[str, Any] | None = None,
+    personalization_signals: list[str] | None = None,
 ) -> dict[str, Any]:
     feature_context = _extract_feature_context(tongue_features)
     return {
@@ -442,6 +559,8 @@ def _build_report_generation_context(
         or tongue_features.get("quality_metrics")
         or {},
         "user_description": user_description,
+        "state_snapshot": state_snapshot or {},
+        "personalization_signals": personalization_signals or [],
         "rag_summary": {
             "query": rag_query,
             "grounded": bool(rag_context.get("grounded")),
@@ -500,6 +619,13 @@ REPORT_SYNTHESIS_SYSTEM_PROMPT_V2 = """你是舌象健康管理报告生成助�
 8. sections 不要包含“识别证据”或“识别边界”板块，用户正文不展示模型识别过程。
 9. comprehensive_summary 不要写“图像模型识别到”“识别证据”“识别边界”，直接写舌象健康管理建议。
 10. risk_tips 必须提醒内容不能替代医生诊断。
+11. 如果上下文 state_snapshot.skipped 为 true，必须说明个性化信息不足，不能猜测用户近期状态。
+12. 如果提供了 state_snapshot，至少使用 personalization_signals 中两项用户选择；不足两项则使用全部。
+13. 建议必须出现“因为你反馈/选择了……所以建议……”这种因果表达。
+14. 饮食建议必须包含具体日常食物示例。
+15. 运动建议必须包含运动项目、时长和强度；如用户提到损伤或不适，先避开冲突运动。
+16. 用户选择 NORMAL 时，不要把正常项写成异常。
+17. 自由描述中的过敏、忌口、运动损伤和正在执行的计划优先级最高。
 
 返回 JSON 结构：
 {
@@ -1183,6 +1309,8 @@ async def _generate_integrated_report_answer(
     rag_context: dict[str, Any],
     rag_query: str,
     user_description: str,
+    state_snapshot: dict[str, Any] | None = None,
+    personalization_signals: list[str] | None = None,
 ) -> tuple[str, dict[str, Any], str, list[str]] | None:
     settings = get_settings()
     context = _build_report_generation_context(
@@ -1191,6 +1319,8 @@ async def _generate_integrated_report_answer(
         rag_context=rag_context,
         rag_query=rag_query,
         user_description=user_description,
+        state_snapshot=state_snapshot,
+        personalization_signals=personalization_signals,
     )
 
     messages = [
@@ -1349,16 +1479,42 @@ def _build_template_schema2_structured_report_answer(
     tongue_features: dict[str, Any],
     feature_names: list[str],
     user_description: str,
+    state_snapshot: dict[str, Any] | None = None,
+    personalization_signals: list[str] | None = None,
 ) -> dict[str, Any]:
     context = _extract_feature_context(tongue_features)
+    signals = personalization_signals or _personalization_signals(state_snapshot or {})
+    summary = _default_summary(feature_names, user_description)
+    if state_snapshot and state_snapshot.get("skipped"):
+        summary += "你本次跳过了近3天状态补充，因此个性化信息不足，建议先按保守方式执行并继续记录。"
+    elif signals:
+        summary += f"本次已结合你反馈的{ '、'.join(signals[:3]) }，建议优先做轻量、可观察的调整。"
+
+    diet_plan = _default_plan("diet_plan", feature_names)
+    sleep_plan = _default_plan("sleep_plan", feature_names)
+    exercise_plan = _default_plan("exercise_plan", feature_names)
+    snapshot = state_snapshot or {}
+    if snapshot.get("digestion_status") in {"BLOATING", "GREASY_REFLUX_DISCOMFORT"}:
+        diet_plan["actions"] = [
+            "因为你反馈饭后容易不舒服，所以这三天晚餐先控制在七分饱，可选小米粥、山药、南瓜、鸡蛋或豆腐等温和食物。"
+        ] + diet_plan["actions"]
+    if snapshot.get("sleep_status") in {"SHORT", "DIFFICULT_OR_WAKE", "IRREGULAR_LATE"}:
+        sleep_plan["actions"] = [
+            "因为你反馈近期睡眠不够稳定，所以先把入睡时间前移15到30分钟，睡前一小时减少刷屏和夜宵。"
+        ] + sleep_plan["actions"]
+    if "FATIGUE" in (snapshot.get("current_states") or []):
+        exercise_plan["actions"] = [
+            "因为你反馈容易疲乏，所以运动先选饭后15到20分钟舒缓步行或轻柔拉伸，以微微发热、不明显气喘为度。"
+        ] + exercise_plan["actions"]
+
     payload = {
         "schema_version": REPORT_SCHEMA_VERSION,
-        "comprehensive_summary": _default_summary(feature_names, user_description),
+        "comprehensive_summary": summary,
         "tongue_feature_explanation": _default_tongue_feature_explanation(feature_names),
         "conditional_analysis": _default_conditional_analysis(feature_names),
-        "diet_plan": _default_plan("diet_plan", feature_names),
-        "sleep_plan": _default_plan("sleep_plan", feature_names),
-        "exercise_plan": _default_plan("exercise_plan", feature_names),
+        "diet_plan": diet_plan,
+        "sleep_plan": sleep_plan,
+        "exercise_plan": exercise_plan,
         "three_day_observation": _build_observation_points(feature_names)[:6],
         "followup_questions": _default_followup_questions(),
         "risk_tips": [
@@ -1399,6 +1555,8 @@ def _build_tongue_analysis_report(
     rag_context: dict[str, Any],
     rag_query: str,
     user_description: str,
+    state_snapshot: dict[str, Any] | None,
+    personalization_signals: list[str],
     report_generation_mode: str,
     report_missing_fields: list[str],
     content: str,
@@ -1477,6 +1635,8 @@ def _build_tongue_analysis_report(
         },
         metadata={
             "user_description": user_description,
+            "state_snapshot": state_snapshot or {},
+            "personalization_signals": personalization_signals,
             "report_generation": {
                 "mode": report_generation_mode,
                 "missing_fields": report_missing_fields,
@@ -1486,6 +1646,8 @@ def _build_tongue_analysis_report(
                     "not_evaluated_dimensions",
                     "unsupported_dimensions",
                     "user_description",
+                    "state_snapshot",
+                    "personalization_signals",
                     "rag_summary",
                 ],
             },
@@ -1519,10 +1681,12 @@ async def tongue_report_node(state: AgentState) -> AgentState:
 
     feature_names = _detected_feature_names(tongue_features)
     user_description = _extract_user_description(state)
+    state_snapshot = _extract_state_snapshot(state)
+    personalization_signals = _personalization_signals(state_snapshot)
     feature_rag_query = str(tongue_features.get("rag_query") or "").strip()
     if not feature_rag_query:
         feature_rag_query = _build_feature_name_rag_query(feature_names)
-    rag_query = _build_augmented_rag_query(feature_rag_query, user_description)
+    rag_query = _build_augmented_rag_query(feature_rag_query, user_description, state_snapshot)
 
     if rag_query:
         rag_context = await answer_with_rag(rag_query)
@@ -1535,6 +1699,8 @@ async def tongue_report_node(state: AgentState) -> AgentState:
         rag_context=rag_context,
         rag_query=rag_query,
         user_description=user_description,
+        state_snapshot=state_snapshot,
+        personalization_signals=personalization_signals,
     )
     content = None
     structured_answer = None
@@ -1554,6 +1720,8 @@ async def tongue_report_node(state: AgentState) -> AgentState:
             tongue_features=tongue_features,
             feature_names=feature_names,
             user_description=user_description,
+            state_snapshot=state_snapshot,
+            personalization_signals=personalization_signals,
         )
         report_missing_fields = _validate_schema2_report(structured_answer)
         content = _compose_schema2_text(structured_answer)
@@ -1562,6 +1730,8 @@ async def tongue_report_node(state: AgentState) -> AgentState:
             tongue_features=tongue_features,
             feature_names=feature_names,
             user_description=user_description,
+            state_snapshot=state_snapshot,
+            personalization_signals=personalization_signals,
         )
 
     draft_report = _build_tongue_analysis_report(
@@ -1571,6 +1741,8 @@ async def tongue_report_node(state: AgentState) -> AgentState:
         rag_context=rag_context,
         rag_query=rag_query,
         user_description=user_description,
+        state_snapshot=state_snapshot,
+        personalization_signals=personalization_signals,
         report_generation_mode=report_generation_mode,
         report_missing_fields=report_missing_fields,
         content=content,
