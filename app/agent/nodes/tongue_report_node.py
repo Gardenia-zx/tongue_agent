@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import Any
 
@@ -19,6 +20,40 @@ def get_chat_model_client():
     return _get_chat_model_client()
 from app.schemas.tongue import TongueStandardFeatures
 from app.tongue.feature_mapping import FEATURE_MAPPINGS, build_tongue_feature_rag_query
+
+
+logger = logging.getLogger(__name__)
+REPORT_SCHEMA_VERSION = "2.0"
+SUMMARY_MIN_LENGTH = 40
+PLAN_KEYS = ("diet_plan", "sleep_plan", "exercise_plan")
+REPORT_DIMENSIONS = {
+    "tongue_body.color": "舌质颜色",
+    "tongue_body.shape": "舌体形态",
+    "tongue_body.texture": "舌体质地",
+    "coating.color": "舌苔颜色",
+    "coating.thickness": "舌苔厚薄",
+    "coating.moisture": "舌苔润燥",
+    "coating.texture": "舌苔质地",
+    "regions": "局部分区",
+}
+DEFAULT_DIMENSION_VALUES = {
+    "tongue_body.color": "淡红",
+    "tongue_body.shape": "正常",
+    "tongue_body.texture": "未见明显异常",
+    "coating.color": "白色",
+    "coating.thickness": "薄",
+    "coating.moisture": "润",
+    "coating.texture": "不腻",
+    "regions": "未见明显局部异常",
+}
+FEATURE_VALUE_BY_CODE = {
+    "coating.color.white": "白色",
+    "coating.color.yellow": "黄色",
+    "coating.color.black": "黑色",
+    "tongue_body.color.red": "红",
+    "tongue_body.color.purple": "紫",
+    "coating.moisture.slippery": "滑润",
+}
 
 
 def _detected_feature_names(tongue_features: dict[str, Any]) -> list[str]:
@@ -391,17 +426,29 @@ def _format_rag_hits_for_prompt(rag_context: dict[str, Any], *, limit: int = 5) 
 def _build_report_generation_context(
     *,
     feature_names: list[str],
+    tongue_features: dict[str, Any],
     rag_context: dict[str, Any],
     rag_query: str,
     user_description: str,
 ) -> dict[str, Any]:
+    feature_context = _extract_feature_context(tongue_features)
     return {
-        "image_model_features": feature_names,
+        "detected_features": feature_context["detected_features"],
+        "not_evaluated_dimensions": feature_context["not_evaluated_dimensions"],
+        "unsupported_dimensions": feature_context["unsupported_dimensions"],
+        "recognition_limits": feature_context["recognition_limits"],
+        "dimension_values": feature_context["dimension_values"],
+        "image_quality": tongue_features.get("image_quality")
+        or tongue_features.get("quality_metrics")
+        or {},
         "user_description": user_description,
-        "rag_query": rag_query,
-        "rag_grounded": bool(rag_context.get("grounded")),
-        "rag_answer": rag_context.get("answer") or "",
-        "rag_hits": _format_rag_hits_for_prompt(rag_context),
+        "rag_summary": {
+            "query": rag_query,
+            "grounded": bool(rag_context.get("grounded")),
+            "answer": rag_context.get("answer") or "",
+            "hit_count": len(rag_context.get("hits") or []),
+            "hits": _format_rag_hits_for_prompt(rag_context),
+        },
     }
 
 
@@ -435,6 +482,40 @@ JSON 格式：
   "lifestyle_advice": ["生活方式建议，最多 4 条，只写作息、口腔清洁、复拍习惯等内容"],
   "observation": ["接下来需要观察或复拍确认的变化，最多 6 条"],
   "risk_reminder": "一句安全提醒"
+}
+"""
+
+REPORT_SYNTHESIS_SYSTEM_PROMPT_V2 = """你是舌象健康管理报告生成助手，只能生成一般健康管理参考，不能诊断疾病。
+
+必须一次性返回完整 JSON，不要输出 Markdown、标题符号或额外解释。
+
+强约束：
+1. 顶层 schema_version 必须是 "2.0"。
+2. recognition_evidence 只能使用用户上下文 detected_features 中已有的 code/name/confidence/status，不得新增、改名或把未评估维度写成识别事实。
+3. recognition_limits 只能来自上下文的 recognition_limits、not_evaluated_dimensions、unsupported_dimensions。
+4. dimension_values 可用于生成建议；其中 DEFAULT 是系统默认值，不要写成模型识别事实。
+5. 对默认值或未识别但需要讨论的情况，只能写在 conditional_analysis，使用“如果……”结构。
+6. diet_plan、sleep_plan、exercise_plan 必须是对象，且包含 goal、actions、frequency、duration、observation_metrics。
+7. 报告要详细，饮食、睡眠、运动都要给出可执行计划；exercise_plan 必须包含每日运动安排。
+8. sections 不要包含“识别证据”或“识别边界”板块，用户正文不展示模型识别过程。
+9. comprehensive_summary 不要写“图像模型识别到”“识别证据”“识别边界”，直接写舌象健康管理建议。
+10. risk_tips 必须提醒内容不能替代医生诊断。
+
+返回 JSON 结构：
+{
+  "schema_version": "2.0",
+  "comprehensive_summary": "4到8句话，说明已识别事实、可信边界、结合用户描述的健康管理方向和后续观察重点",
+  "recognition_evidence": [{"code": "来自上下文", "name": "来自上下文", "confidence": 0.9, "status": "DETECTED"}],
+  "recognition_limits": [{"dimension": "来自上下文", "status": "NOT_EVALUATED 或 UNSUPPORTED_BY_MODEL", "reason": "边界说明"}],
+  "dimension_values": [{"dimension": "coating.color", "name": "舌苔颜色", "value": "白色", "status": "DETECTED 或 DEFAULT"}],
+  "tongue_feature_explanation": "详细解释已识别特征的健康管理含义，不把未识别维度当事实",
+  "conditional_analysis": [{"condition": "如果……", "interpretation": "对应观察解释"}],
+  "diet_plan": {"goal": "目标", "actions": ["具体行动"], "frequency": "每天", "duration": "连续3天", "observation_metrics": ["观察指标"]},
+  "sleep_plan": {"goal": "目标", "actions": ["具体行动"], "frequency": "每天", "duration": "连续3天", "observation_metrics": ["观察指标"]},
+  "exercise_plan": {"goal": "目标", "actions": ["具体行动"], "frequency": "每天", "duration": "连续3天", "observation_metrics": ["观察指标"]},
+  "three_day_observation": ["至少3条"],
+  "followup_questions": ["至少3条"],
+  "risk_tips": ["至少1条"]
 }
 """
 
@@ -487,6 +568,486 @@ def _clean_items(value: Any, *, max_items: int = 4) -> list[str]:
         if len(items) >= max_items:
             break
     return items
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dimension_from_feature_code(code: str) -> str:
+    parts = code.split(".")
+    if len(parts) >= 2 and parts[0] in {"tongue_body", "coating"}:
+        return f"{parts[0]}.{parts[1]}"
+    if parts and parts[0] == "regions":
+        return "regions"
+    return parts[0] if parts else "unknown"
+
+
+def _dimension_label(dimension: str) -> str:
+    return REPORT_DIMENSIONS.get(dimension, dimension)
+
+
+def _feature_value(item: dict[str, Any]) -> str:
+    code = str(item.get("code") or "")
+    return FEATURE_VALUE_BY_CODE.get(code) or str(item.get("name") or code)
+
+
+def _extract_feature_context(tongue_features: dict[str, Any]) -> dict[str, Any]:
+    feature_items = _build_tongue_feature_dicts(tongue_features)
+    detected: list[dict[str, Any]] = []
+    detected_dimensions: set[str] = set()
+    unsupported_dimensions: set[str] = set()
+    dimension_values: dict[str, dict[str, Any]] = {
+        dimension: {
+            "dimension": dimension,
+            "name": _dimension_label(dimension),
+            "value": value,
+            "status": "DEFAULT",
+        }
+        for dimension, value in DEFAULT_DIMENSION_VALUES.items()
+    }
+
+    for item in feature_items:
+        code = str(item.get("code") or "").strip()
+        if not code:
+            continue
+        status = str(item.get("status") or "DETECTED").upper()
+        dimension = _dimension_from_feature_code(code)
+        if status == "DETECTED":
+            detected.append(
+                {
+                    "code": code,
+                    "name": str(item.get("name") or code),
+                    "confidence": _safe_float(item.get("confidence")),
+                    "status": "DETECTED",
+                }
+            )
+            detected_dimensions.add(dimension)
+            dimension_values[dimension] = {
+                "dimension": dimension,
+                "name": _dimension_label(dimension),
+                "value": _feature_value(item),
+                "status": "DETECTED",
+                "confidence": _safe_float(item.get("confidence")),
+            }
+        elif status == "UNSUPPORTED_BY_MODEL":
+            unsupported_dimensions.add(dimension)
+
+    for code in tongue_features.get("unsupported_feature_codes") or []:
+        if isinstance(code, str) and code.strip():
+            unsupported_dimensions.add(_dimension_from_feature_code(code.strip()))
+
+    explicit_not_evaluated: set[str] = set()
+    for code in tongue_features.get("not_evaluated_feature_codes") or []:
+        if isinstance(code, str) and code.strip():
+            explicit_not_evaluated.add(_dimension_from_feature_code(code.strip()))
+
+    known_dimensions = set(REPORT_DIMENSIONS.keys())
+    not_evaluated_dimensions = (
+        known_dimensions - detected_dimensions - unsupported_dimensions
+    ) | explicit_not_evaluated
+
+    limits: list[dict[str, Any]] = []
+    for dimension in sorted(not_evaluated_dimensions):
+        limits.append(
+            {
+                "dimension": dimension,
+                "name": _dimension_label(dimension),
+                "status": "NOT_EVALUATED",
+                "reason": "本次图像模型未给出该维度的稳定识别结果，不能作为已识别事实。",
+            }
+        )
+    for dimension in sorted(unsupported_dimensions):
+        limits.append(
+            {
+                "dimension": dimension,
+                "name": _dimension_label(dimension),
+                "status": "UNSUPPORTED_BY_MODEL",
+                "reason": "当前模型暂不支持该维度，不参与本次舌象结论。",
+            }
+        )
+
+    return {
+        "detected_features": detected,
+        "recognition_limits": limits,
+        "dimension_values": list(dimension_values.values()),
+        "detected_dimensions": sorted(detected_dimensions),
+        "unsupported_dimensions": sorted(unsupported_dimensions),
+        "not_evaluated_dimensions": sorted(not_evaluated_dimensions),
+    }
+
+
+def _default_summary(feature_names: list[str], user_description: str) -> str:
+    feature_text = "、".join(feature_names) if feature_names else "当前舌象信息"
+    description = user_description.strip()
+    if description:
+        return (
+            f"结合当前舌象信息和你补充的“{description}”，可以先把重点放在饮食规律、胃肠感受、睡眠恢复和运动节奏上。"
+            f"{feature_text}适合作为近期健康管理的观察线索，但不能单独等同于疾病判断。"
+            "接下来建议用连续三天的饮食、睡眠、运动和大便状态来验证调整是否有效。"
+        )
+    return (
+        f"结合当前舌象信息，可以先围绕饮食清淡规律、睡眠恢复、适度运动和胃肠状态做连续观察。{feature_text}只能作为一般健康管理参考，"
+        "不能直接等同于疾病判断。建议近三天记录饭后腹胀、口中黏腻感、大便状态、睡眠质量和运动后恢复情况。"
+    )
+
+
+def _default_tongue_feature_explanation(feature_names: list[str]) -> str:
+    if feature_names:
+        return (
+            f"当前舌象信息中可重点参考：{'、'.join(feature_names)}。这些表现需要和饮食作息、胃肠状态、睡眠恢复及复拍变化一起理解。"
+            "单次舌象只能作为健康管理线索，后续更适合看连续变化。"
+        )
+    return (
+        "本次图像未形成足够明确的标准特征结论。建议优先补充近期饮食、睡眠、胃肠状态和复拍图像，再进行更具体的健康管理分析。"
+    )
+
+
+def _default_conditional_analysis(feature_names: list[str]) -> list[dict[str, str]]:
+    feature_text = "、".join(feature_names) if feature_names else "当前特征"
+    return [
+        {
+            "condition": f"如果后续复拍仍稳定出现{feature_text}",
+            "interpretation": "可结合饮食、睡眠、口腔清洁和胃肠状态观察是否存在持续性变化，不要只凭单次图片下结论。",
+        },
+        {
+            "condition": "如果实际舌苔偏厚、发腻或口中黏腻感明显",
+            "interpretation": "建议重点记录油腻甜食、夜宵、饮酒、腹胀、大便黏滞和食欲变化。",
+        },
+        {
+            "condition": "如果只是薄白且无明显不适",
+            "interpretation": "通常以规律饮食、稳定作息和连续观察为主，不需要做激烈调整。",
+        },
+    ]
+
+
+def _default_plan(plan_key: str, feature_names: list[str]) -> dict[str, Any]:
+    if plan_key == "diet_plan":
+        return {
+            "goal": "减轻近期饮食对舌象和胃肠状态的干扰",
+            "actions": [
+                "三餐尽量规律，晚餐七八分饱，减少夜宵。",
+                "连续三天少吃生冷、油腻、甜腻、辛辣和酒精。",
+                "优先选择温热、清淡、容易消化的日常食物，例如粥、面、山药、南瓜和熟蔬菜。",
+                "饭后记录腹胀、口腻、食欲和大便状态，观察是否随饮食调整改善。",
+            ],
+            "frequency": "每天",
+            "duration": "连续3天",
+            "observation_metrics": ["饭后腹胀", "口中黏腻感", "食欲", "大便状态"],
+        }
+    if plan_key == "sleep_plan":
+        return {
+            "goal": "稳定作息，减少熬夜对舌象和恢复状态的影响",
+            "actions": [
+                "尽量固定入睡和起床时间，睡前一小时减少高强度工作和刷屏。",
+                "晚餐后避免大量咖啡因、酒精和过饱进食。",
+                "记录入睡时间、夜醒次数、醒后疲乏感和晨起口干口苦情况。",
+            ],
+            "frequency": "每天",
+            "duration": "连续3天",
+            "observation_metrics": ["入睡时间", "夜醒次数", "醒后疲乏感", "晨起口干"],
+        }
+    return {
+        "goal": "用低风险、可持续的活动促进循环和恢复",
+        "actions": [
+            "每天安排20到30分钟中等强度快走，能说话但略微出汗即可。",
+            "久坐超过一小时后起身活动3到5分钟，做肩颈、髋部和小腿拉伸。",
+            "如果近期疲乏明显，先选择散步、八段锦或轻柔拉伸，避免突然增加高强度训练。",
+            "运动后观察疲劳、睡眠、胃口和第二天精神状态。",
+        ],
+        "frequency": "每天",
+        "duration": "连续3天",
+        "observation_metrics": ["运动后疲劳", "睡眠质量", "食欲", "第二天精神状态"],
+    }
+
+
+def _clean_plan(value: Any, *, plan_key: str) -> dict[str, Any]:
+    fallback = _default_plan(plan_key, [])
+    source = value if isinstance(value, dict) else {}
+    actions = _clean_items(source.get("actions") if source else value, max_items=6)
+    metrics = _clean_items(source.get("observation_metrics"), max_items=5)
+    plan = {
+        "goal": _clean_text(source.get("goal"), max_length=120) or fallback["goal"],
+        "actions": actions or fallback["actions"],
+        "frequency": _clean_text(source.get("frequency"), max_length=40) or fallback["frequency"],
+        "duration": _clean_text(source.get("duration"), max_length=40) or fallback["duration"],
+        "observation_metrics": metrics or fallback["observation_metrics"],
+    }
+    return plan
+
+
+def _clean_conditional_analysis(value: Any, feature_names: list[str]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            condition = _clean_text(item.get("condition"), max_length=120)
+            interpretation = _clean_text(item.get("interpretation"), max_length=260)
+            if condition and interpretation:
+                items.append({"condition": condition, "interpretation": interpretation})
+            if len(items) >= 5:
+                break
+    return items or _default_conditional_analysis(feature_names)
+
+
+def _ensure_min_items(items: list[str], fallback: list[str], min_items: int, max_items: int) -> list[str]:
+    result = list(items[:max_items])
+    for item in fallback:
+        if len(result) >= min_items:
+            break
+        if item not in result:
+            result.append(item)
+    return result[:max_items]
+
+
+def _default_followup_questions() -> list[str]:
+    return [
+        "最近三天是否有腹胀、口中黏腻、食欲下降或大便黏滞？",
+        "最近是否熬夜、饮酒、吃夜宵，或明显增加生冷甜腻食物？",
+        "复拍时舌苔厚薄、润燥、颜色范围是否和本次相近？",
+    ]
+
+
+def _normalize_schema2_payload(
+    *,
+    payload: dict[str, Any],
+    context: dict[str, Any],
+    feature_names: list[str],
+    user_description: str,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    missing_fields: list[str] = []
+    result_summary = _clean_text(
+        payload.get("comprehensive_summary")
+        or payload.get("result_summary")
+        or payload.get("summary"),
+        max_length=1000,
+    )
+    if not result_summary:
+        return None, ["comprehensive_summary"]
+    if len(result_summary) < SUMMARY_MIN_LENGTH:
+        result_summary = f"{result_summary} {_default_summary(feature_names, user_description)}".strip()
+        missing_fields.append("comprehensive_summary")
+
+    feature_explanation = _clean_text(
+        payload.get("tongue_feature_explanation") or payload.get("health_interpretation"),
+        max_length=800,
+    ) or _default_tongue_feature_explanation(feature_names)
+
+    three_day_observation = _clean_items(
+        payload.get("three_day_observation")
+        or payload.get("observation")
+        or payload.get("observation_points"),
+        max_items=6,
+    )
+    three_day_observation = _ensure_min_items(
+        three_day_observation,
+        _build_observation_points(feature_names),
+        3,
+        6,
+    )
+
+    followup_questions = _clean_items(payload.get("followup_questions"), max_items=5)
+    followup_questions = _ensure_min_items(
+        followup_questions,
+        _default_followup_questions(),
+        3,
+        5,
+    )
+
+    risk_tips = _clean_items(
+        payload.get("risk_tips") or payload.get("risk_reminder"),
+        max_items=3,
+    )
+    if not risk_tips:
+        risk_tips = [
+            "以上内容用于一般健康知识说明和健康管理参考，不能替代医生诊断；如果不适明显或持续加重，请及时咨询医生。"
+        ]
+
+    diet_source = payload.get("diet_plan") or payload.get("dietary_advice")
+    sleep_source = payload.get("sleep_plan") or payload.get("lifestyle_advice")
+    exercise_source = payload.get("exercise_plan") or payload.get("exercise_advice")
+    structured = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "answer_type": "TONGUE_REPORT",
+        "title": "舌象健康参考",
+        "summary": result_summary,
+        "comprehensive_summary": result_summary,
+        "recognition_evidence": context["detected_features"],
+        "recognition_limits": context["recognition_limits"],
+        "dimension_values": context.get("dimension_values") or [],
+        "conditional_analysis": _clean_conditional_analysis(
+            payload.get("conditional_analysis"), feature_names
+        ),
+        "tongue_feature_explanation": feature_explanation,
+        "diet_plan": _clean_plan(diet_source, plan_key="diet_plan"),
+        "sleep_plan": _clean_plan(sleep_source, plan_key="sleep_plan"),
+        "exercise_plan": _clean_plan(exercise_source, plan_key="exercise_plan"),
+        "three_day_observation": three_day_observation,
+        "followup_questions": followup_questions,
+        "risk_tips": risk_tips,
+        "disclaimer": risk_tips[0],
+    }
+
+    legacy = _derive_legacy_fields(structured)
+    structured.update(legacy)
+    structured["sections"] = _build_schema2_sections(structured)
+    structured["highlights"] = [
+        "已生成饮食、睡眠和运动计划",
+    ]
+
+    validation_errors = _validate_schema2_report(structured)
+    missing_fields.extend(validation_errors)
+    return structured, sorted(set(missing_fields))
+
+
+def _derive_legacy_fields(structured: dict[str, Any]) -> dict[str, Any]:
+    diet_plan = structured.get("diet_plan") if isinstance(structured.get("diet_plan"), dict) else {}
+    sleep_plan = structured.get("sleep_plan") if isinstance(structured.get("sleep_plan"), dict) else {}
+    exercise_plan = structured.get("exercise_plan") if isinstance(structured.get("exercise_plan"), dict) else {}
+    health_interpretation = (
+        _clean_text(structured.get("tongue_feature_explanation"), max_length=800)
+        or _clean_text(structured.get("comprehensive_summary"), max_length=800)
+    )
+    lifestyle_actions = list(sleep_plan.get("actions") or [])
+    return {
+        "health_interpretation": health_interpretation,
+        "dietary_advice": list(diet_plan.get("actions") or [])[:4],
+        "exercise_advice": list(exercise_plan.get("actions") or [])[:4],
+        "lifestyle_advice": lifestyle_actions[:4],
+        "observation_points": list(structured.get("three_day_observation") or [])[:6],
+    }
+
+
+def _build_schema2_sections(structured: dict[str, Any]) -> list[dict[str, Any]]:
+    conditional_items = [
+        f"{item.get('condition')}：{item.get('interpretation')}"
+        for item in structured.get("conditional_analysis") or []
+        if isinstance(item, dict)
+    ]
+
+    def plan_section(key: str, title: str) -> dict[str, Any]:
+        plan = structured.get(key) if isinstance(structured.get(key), dict) else {}
+        return {
+            "section_key": key,
+            "title": title,
+            "content": plan.get("goal"),
+            "items": list(plan.get("actions") or []),
+            "metadata": {
+                "frequency": plan.get("frequency"),
+                "duration": plan.get("duration"),
+                "observation_metrics": plan.get("observation_metrics") or [],
+            },
+        }
+
+    return [
+        {
+            "section_key": "tongue_feature_explanation",
+            "title": "舌象特征解释",
+            "content": structured.get("tongue_feature_explanation"),
+        },
+        {"section_key": "conditional_analysis", "title": "条件性分析", "items": conditional_items},
+        plan_section("diet_plan", "饮食计划"),
+        plan_section("sleep_plan", "睡眠计划"),
+        plan_section("exercise_plan", "运动计划"),
+        {
+            "section_key": "three_day_observation",
+            "title": "未来三天观察",
+            "items": structured.get("three_day_observation") or [],
+        },
+        {
+            "section_key": "followup_questions",
+            "title": "后续追问",
+            "items": structured.get("followup_questions") or [],
+        },
+    ]
+
+
+def _validate_schema2_report(structured: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if len(_clean_text(structured.get("comprehensive_summary"), max_length=2000)) < SUMMARY_MIN_LENGTH:
+        errors.append("comprehensive_summary")
+    evidence = structured.get("recognition_evidence")
+    if not isinstance(evidence, list) or not evidence:
+        errors.append("recognition_evidence")
+    else:
+        for item in evidence:
+            if not isinstance(item, dict) or item.get("status") != "DETECTED":
+                errors.append("recognition_evidence")
+                break
+    limits = structured.get("recognition_limits")
+    if not isinstance(limits, list) or not limits:
+        errors.append("recognition_limits")
+    for key in PLAN_KEYS:
+        plan = structured.get(key)
+        if not isinstance(plan, dict) or not _clean_items(plan.get("actions"), max_items=6):
+            errors.append(key)
+    if len(_clean_items(structured.get("three_day_observation"), max_items=6)) < 3:
+        errors.append("three_day_observation")
+    if len(_clean_items(structured.get("followup_questions"), max_items=5)) < 3:
+        errors.append("followup_questions")
+    return sorted(set(errors))
+
+
+def _compose_schema2_text(structured: dict[str, Any]) -> str:
+    lines = ["本次结果", str(structured.get("comprehensive_summary") or "").strip()]
+    for section in structured.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or "").strip()
+        content = str(section.get("content") or "").strip()
+        items = [str(item).strip() for item in section.get("items") or [] if str(item).strip()]
+        if not title or (not content and not items):
+            continue
+        lines.extend(["", title])
+        if content:
+            lines.append(content)
+        if items:
+            lines.append(_format_numbered(items))
+    risk_tips = structured.get("risk_tips") or []
+    if risk_tips:
+        lines.extend(["", "提醒", str(risk_tips[0])])
+    return "\n".join(lines).strip()
+
+
+def _json_complete(text: str) -> bool:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"```$", "", text).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return False
+    try:
+        json.loads(text[start : end + 1])
+        return True
+    except json.JSONDecodeError:
+        return False
+
+
+def _compose_schema2_report(
+    *,
+    payload: dict[str, Any],
+    context: dict[str, Any],
+    feature_names: list[str],
+    user_description: str,
+) -> tuple[str, dict[str, Any], str, list[str]] | None:
+    structured, missing_fields = _normalize_schema2_payload(
+        payload=payload,
+        context=context,
+        feature_names=feature_names,
+        user_description=user_description,
+    )
+    if structured is None:
+        return None
+    mode = "llm_partial_repaired" if missing_fields else "llm_full"
+    return _compose_schema2_text(structured), structured, mode, missing_fields
 
 
 def _compose_user_facing_report(
@@ -618,13 +1179,15 @@ def _build_structured_report_answer(
 async def _generate_integrated_report_answer(
     *,
     feature_names: list[str],
+    tongue_features: dict[str, Any],
     rag_context: dict[str, Any],
     rag_query: str,
     user_description: str,
-) -> tuple[str, dict[str, Any]] | None:
+) -> tuple[str, dict[str, Any], str, list[str]] | None:
     settings = get_settings()
     context = _build_report_generation_context(
         feature_names=feature_names,
+        tongue_features=tongue_features,
         rag_context=rag_context,
         rag_query=rag_query,
         user_description=user_description,
@@ -633,7 +1196,7 @@ async def _generate_integrated_report_answer(
     messages = [
         {
             "role": "system",
-            "content": REPORT_SYNTHESIS_SYSTEM_PROMPT,
+            "content": REPORT_SYNTHESIS_SYSTEM_PROMPT_V2,
         },
         {
             "role": "user",
@@ -645,23 +1208,67 @@ async def _generate_integrated_report_answer(
     ]
 
     try:
-        raw_content = await get_chat_model_client().generate(
+        result = await get_chat_model_client().generate_with_metadata(
             messages=messages,
-            temperature=0.25,
-            max_tokens=min(settings.chat_model_max_tokens, 1800),
+            temperature=settings.report_model_temperature,
+            max_tokens=settings.report_model_max_tokens,
         )
-    except Exception:
+        raw_content = result.content
+        finish_reason = result.finish_reason
+    except Exception as exc:
+        logger.warning(
+            "tongue_report_model_request_failed",
+            extra={"rag_hit_count": len(rag_context.get("hits") or []), "error": str(exc)},
+        )
         return None
 
+    logger.info(
+        "tongue_report_model_finished",
+        extra={
+            "finish_reason": finish_reason,
+            "rag_hit_count": len(rag_context.get("hits") or []),
+        },
+    )
     payload = _extract_json_object(raw_content)
     if payload is None:
+        suspected_truncated = finish_reason == "length" or not _json_complete(raw_content)
+        logger.warning(
+            "tongue_report_json_parse_failed",
+            extra={
+                "finish_reason": finish_reason,
+                "suspected_truncated": suspected_truncated,
+                "rag_hit_count": len(rag_context.get("hits") or []),
+            },
+        )
         return None
 
-    return _compose_user_facing_report(
+    composed = _compose_schema2_report(
         payload=payload,
+        context=context,
         feature_names=feature_names,
         user_description=user_description,
     )
+    if composed is None:
+        logger.warning(
+            "tongue_report_core_summary_missing",
+            extra={
+                "finish_reason": finish_reason,
+                "rag_hit_count": len(rag_context.get("hits") or []),
+            },
+        )
+        return None
+
+    content, structured, mode, missing_fields = composed
+    logger.info(
+        "tongue_report_generation_mode",
+        extra={
+            "mode": mode,
+            "missing_fields": missing_fields,
+            "finish_reason": finish_reason,
+            "rag_hit_count": len(rag_context.get("hits") or []),
+        },
+    )
+    return content, structured, mode, missing_fields
 
 
 def _compose_report_answer(
@@ -737,6 +1344,53 @@ def _build_template_structured_report_answer(
     return answer
 
 
+def _build_template_schema2_structured_report_answer(
+    *,
+    tongue_features: dict[str, Any],
+    feature_names: list[str],
+    user_description: str,
+) -> dict[str, Any]:
+    context = _extract_feature_context(tongue_features)
+    payload = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "comprehensive_summary": _default_summary(feature_names, user_description),
+        "tongue_feature_explanation": _default_tongue_feature_explanation(feature_names),
+        "conditional_analysis": _default_conditional_analysis(feature_names),
+        "diet_plan": _default_plan("diet_plan", feature_names),
+        "sleep_plan": _default_plan("sleep_plan", feature_names),
+        "exercise_plan": _default_plan("exercise_plan", feature_names),
+        "three_day_observation": _build_observation_points(feature_names)[:6],
+        "followup_questions": _default_followup_questions(),
+        "risk_tips": [
+            "以上内容用于一般健康知识说明和健康管理参考，不能替代医生诊断；如果不适明显或持续加重，请及时咨询医生。"
+        ],
+    }
+    structured, _missing = _normalize_schema2_payload(
+        payload=payload,
+        context={
+            "detected_features": context["detected_features"],
+            "recognition_limits": context["recognition_limits"],
+            "dimension_values": context["dimension_values"],
+        },
+        feature_names=feature_names,
+        user_description=user_description,
+    )
+    if structured is None:
+        return _build_structured_report_answer(
+            result_summary=_default_summary(feature_names, user_description),
+            daily_care=(
+                _build_dietary_advice(feature_names)
+                + _build_exercise_advice(feature_names)
+                + _build_lifestyle_advice(feature_names)
+            )[:6],
+            observation=_build_observation_points(feature_names)[:4],
+            risk_reminder=payload["risk_tips"][0],
+            feature_names=feature_names,
+            user_description=user_description,
+        )
+    return structured
+
+
 def _build_tongue_analysis_report(
     *,
     state: AgentState,
@@ -746,6 +1400,7 @@ def _build_tongue_analysis_report(
     rag_query: str,
     user_description: str,
     report_generation_mode: str,
+    report_missing_fields: list[str],
     content: str,
     structured_answer: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -772,6 +1427,7 @@ def _build_tongue_analysis_report(
         risk_tips = [risk_tip]
 
     report = TongueAnalysisReport(
+        schema_version=REPORT_SCHEMA_VERSION,
         report_status="FINAL",
         report_id=state.get("report_id"),
         user_id=state.get("user_id"),
@@ -786,6 +1442,25 @@ def _build_tongue_analysis_report(
         rag_evidence=_build_rag_evidence(rag_context),
         evidence_refs=_build_evidence_refs(rag_context),
         comprehensive_summary=comprehensive_summary,
+        recognition_evidence=structured.get("recognition_evidence") or [],
+        recognition_limits=structured.get("recognition_limits") or [],
+        dimension_values=structured.get("dimension_values") or [],
+        conditional_analysis=structured.get("conditional_analysis") or [],
+        tongue_feature_explanation=_clean_text(
+            structured.get("tongue_feature_explanation"),
+            max_length=900,
+        ),
+        diet_plan=structured.get("diet_plan") or _default_plan("diet_plan", feature_names),
+        sleep_plan=structured.get("sleep_plan") or _default_plan("sleep_plan", feature_names),
+        exercise_plan=structured.get("exercise_plan") or _default_plan("exercise_plan", feature_names),
+        three_day_observation=_clean_items(
+            structured.get("three_day_observation"),
+            max_items=6,
+        ) or _build_observation_points(feature_names)[:6],
+        followup_questions=_clean_items(
+            structured.get("followup_questions"),
+            max_items=5,
+        ) or _default_followup_questions(),
         tongue_features=_build_tongue_feature_dicts(tongue_features),
         health_interpretation=health_interpretation,
         dietary_advice=dietary_advice,
@@ -795,7 +1470,7 @@ def _build_tongue_analysis_report(
         summary=content,
         health_notes=_build_health_notes(feature_names),
         versions={
-            "report_schema": "tongue_analysis_report_v1.0",
+            "report_schema": "tongue_analysis_report_v2.0",
             "feature_schema": "tongue_standard_features_v1.0",
             "rag_engine": rag_context.get("retrieval_engine"),
             "answer_engine": rag_context.get("answer_engine"),
@@ -804,11 +1479,14 @@ def _build_tongue_analysis_report(
             "user_description": user_description,
             "report_generation": {
                 "mode": report_generation_mode,
+                "missing_fields": report_missing_fields,
+                "mode_counts": {report_generation_mode: 1},
                 "inputs": [
-                    "image_model_features",
+                    "detected_features",
+                    "not_evaluated_dimensions",
+                    "unsupported_dimensions",
                     "user_description",
-                    "rag_answer",
-                    "rag_hits",
+                    "rag_summary",
                 ],
             },
             "rag_debug": rag_context.get("debug") or {},
@@ -853,31 +1531,35 @@ async def tongue_report_node(state: AgentState) -> AgentState:
 
     generated_answer = await _generate_integrated_report_answer(
         feature_names=feature_names,
+        tongue_features=tongue_features,
         rag_context=rag_context,
         rag_query=rag_query,
         user_description=user_description,
     )
     content = None
     structured_answer = None
+    report_generation_mode = "llm_full"
+    report_missing_fields: list[str] = []
     if isinstance(generated_answer, tuple):
-        content, structured_answer = generated_answer
+        if len(generated_answer) == 4:
+            content, structured_answer, report_generation_mode, report_missing_fields = generated_answer
+        elif len(generated_answer) == 2:
+            content, structured_answer = generated_answer
     elif isinstance(generated_answer, str):
         content = generated_answer
 
-    report_generation_mode = "llm_integrated_synthesis"
     if not content:
         report_generation_mode = "template_fallback"
-        content = _compose_report_answer(
-            feature_names=feature_names,
-            rag_context=rag_context,
-            user_description=user_description,
-        )
-        structured_answer = _build_template_structured_report_answer(
+        structured_answer = _build_template_schema2_structured_report_answer(
+            tongue_features=tongue_features,
             feature_names=feature_names,
             user_description=user_description,
         )
+        report_missing_fields = _validate_schema2_report(structured_answer)
+        content = _compose_schema2_text(structured_answer)
     elif structured_answer is None:
-        structured_answer = _build_template_structured_report_answer(
+        structured_answer = _build_template_schema2_structured_report_answer(
+            tongue_features=tongue_features,
             feature_names=feature_names,
             user_description=user_description,
         )
@@ -890,6 +1572,7 @@ async def tongue_report_node(state: AgentState) -> AgentState:
         rag_query=rag_query,
         user_description=user_description,
         report_generation_mode=report_generation_mode,
+        report_missing_fields=report_missing_fields,
         content=content,
         structured_answer=structured_answer,
     )

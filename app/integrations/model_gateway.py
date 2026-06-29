@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
@@ -11,6 +12,13 @@ from app.core.config import get_settings
 
 class ModelGatewayError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ChatGenerationResult:
+    content: str
+    finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
 
 
 class LocalEmbeddingModel:
@@ -116,6 +124,31 @@ class ChatModelClient:
         tool_choice: str | dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        data = await self._chat_completion(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            extra_body=extra_body,
+        )
+        choice = (data.get("choices") or [])[0]
+        message = choice.get("message") or {}
+        if not isinstance(message, dict):
+            raise ModelGatewayError("Chat model returned invalid message")
+
+        return message
+
+    async def _chat_completion(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        extra_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
@@ -155,11 +188,7 @@ class ChatModelClient:
         if not choices:
             raise ModelGatewayError("Chat model returned empty choices")
 
-        message = choices[0].get("message") or {}
-        if not isinstance(message, dict):
-            raise ModelGatewayError("Chat model returned invalid message")
-
-        return message
+        return data
 
     async def generate(
         self,
@@ -169,17 +198,42 @@ class ChatModelClient:
         max_tokens: int,
         extra_body: dict[str, Any] | None = None,
     ) -> str:
-        message = await self.chat(
+        result = await self.generate_with_metadata(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
             extra_body=extra_body,
         )
+        return result.content
+
+    async def generate_with_metadata(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        extra_body: dict[str, Any] | None = None,
+    ) -> ChatGenerationResult:
+        data = await self._chat_completion(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+        )
+        choice = (data.get("choices") or [])[0]
+        message = choice.get("message") or {}
+        if not isinstance(message, dict):
+            raise ModelGatewayError("Chat model returned invalid message")
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             raise ModelGatewayError("Chat model returned empty content")
 
-        return content.strip()
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+        return ChatGenerationResult(
+            content=content.strip(),
+            finish_reason=choice.get("finish_reason"),
+            usage=usage,
+        )
 
 
 @lru_cache

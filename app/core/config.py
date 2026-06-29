@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     chat_model_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     chat_model_max_tokens: int = Field(default=800, ge=64, le=4096)
     chat_model_max_concurrency: int = Field(default=4, ge=1, le=32)
+    report_model_temperature: float = Field(default=0.15, ge=0.0, le=2.0)
+    report_model_max_tokens: int = Field(default=2200, ge=512, le=4096)
     tongue_model_base_url: str = "http://127.0.0.1:9100"
     tongue_model_api_key: str | None = None
     tongue_model_bearer_token: str | None = None

@@ -32,8 +32,34 @@ class ReportEvidenceRef(BaseModel):
     final_score: float | None = None
 
 
+class ReportRecognitionEvidence(BaseModel):
+    code: str
+    name: str
+    confidence: float | None = None
+    status: Literal["DETECTED"] = "DETECTED"
+
+
+class ReportRecognitionLimit(BaseModel):
+    dimension: str
+    status: Literal["NOT_EVALUATED", "UNSUPPORTED_BY_MODEL"]
+    reason: str = ""
+
+
+class ReportConditionalAnalysis(BaseModel):
+    condition: str
+    interpretation: str
+
+
+class ReportPlan(BaseModel):
+    goal: str = ""
+    actions: list[str] = Field(default_factory=list)
+    frequency: str = "每天"
+    duration: str = "连续3天"
+    observation_metrics: list[str] = Field(default_factory=list)
+
+
 class TongueAnalysisReport(BaseModel):
-    schema_version: str = "1.0"
+    schema_version: str = "2.0"
     report_type: Literal["tongue_analysis_mvp"] = "tongue_analysis_mvp"
     report_status: Literal["DRAFT", "FINAL"] = "DRAFT"
     report_id: int | None = None
@@ -49,6 +75,16 @@ class TongueAnalysisReport(BaseModel):
     rag_evidence: list[ReportRagEvidence] = Field(default_factory=list)
     evidence_refs: list[ReportEvidenceRef] = Field(default_factory=list)
     comprehensive_summary: str = Field(default="", description="面向用户的综合摘要，不能替代诊断。")
+    recognition_evidence: list[ReportRecognitionEvidence] = Field(default_factory=list)
+    recognition_limits: list[ReportRecognitionLimit] = Field(default_factory=list)
+    dimension_values: list[dict[str, Any]] = Field(default_factory=list)
+    conditional_analysis: list[ReportConditionalAnalysis] = Field(default_factory=list)
+    tongue_feature_explanation: str = ""
+    diet_plan: ReportPlan = Field(default_factory=ReportPlan)
+    sleep_plan: ReportPlan = Field(default_factory=ReportPlan)
+    exercise_plan: ReportPlan = Field(default_factory=ReportPlan)
+    three_day_observation: list[str] = Field(default_factory=list)
+    followup_questions: list[str] = Field(default_factory=list)
     tongue_features: list[dict[str, Any]] = Field(default_factory=list)
     health_interpretation: str = Field(default="", description="舌象特征的健康管理解释，不能诊断。")
     dietary_advice: list[str] = Field(

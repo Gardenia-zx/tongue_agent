@@ -644,19 +644,40 @@ async def generate_report_followup_reply(
             "如果 rag_context 有命中内容，请结合知识库结果，但不要把回答写成检索过程。"
         ),
     }
+    detailed_request = is_detailed_report_request(raw_user_text) or is_detailed_report_request(user_text)
+    model_temperature = (
+        settings.report_model_temperature
+        if detailed_request
+        else settings.chat_model_temperature
+    )
+    model_max_tokens = (
+        settings.report_model_max_tokens
+        if detailed_request
+        else settings.chat_model_max_tokens
+    )
 
     try:
-        raw_content = await get_chat_model_client().generate(
-            messages=[
-                {"role": "system", "content": FOLLOWUP_REPORT_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(context, ensure_ascii=False),
-                },
-            ],
-            temperature=settings.chat_model_temperature,
-            max_tokens=settings.chat_model_max_tokens,
-        )
+        messages = [
+            {"role": "system", "content": FOLLOWUP_REPORT_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(context, ensure_ascii=False),
+            },
+        ]
+        client = get_chat_model_client()
+        if detailed_request and hasattr(client, "generate_with_metadata"):
+            result = await client.generate_with_metadata(
+                messages=messages,
+                temperature=model_temperature,
+                max_tokens=model_max_tokens,
+            )
+            raw_content = result.content
+        else:
+            raw_content = await client.generate(
+                messages=messages,
+                temperature=model_temperature,
+                max_tokens=model_max_tokens,
+            )
         payload = extract_json_object(raw_content)
     except Exception:
         payload = None
