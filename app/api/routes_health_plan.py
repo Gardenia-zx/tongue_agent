@@ -3,7 +3,7 @@ import re
 from typing import Any, Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.integrations.model_gateway import ModelGatewayError, get_chat_model_client
 
@@ -13,10 +13,29 @@ router = APIRouter(prefix="/agent/health-plan", tags=["health-plan"])
 
 class HealthPlanAgentRequest(BaseModel):
     mode: Literal["review", "generate_detailed"]
-    plan: dict[str, Any]
+    plan: dict[str, Any] = Field(default_factory=dict)
     report: dict[str, Any] = Field(default_factory=dict)
     state_snapshot: dict[str, Any] = Field(default_factory=dict)
     personalization_signals: list[str] = Field(default_factory=list)
+
+    # Java currently sends these names. Keep both shapes accepted so the
+    # dedicated endpoint stays decoupled from the main chat contract.
+    plan_days: list[dict[str, Any]] = Field(default_factory=list)
+    draft_report: dict[str, Any] = Field(default_factory=dict)
+    plan_id: int | None = None
+    source_report_id: int | None = None
+
+    @model_validator(mode="after")
+    def normalize_payload(self) -> "HealthPlanAgentRequest":
+        if not self.plan and self.plan_days:
+            self.plan = {
+                "plan_id": self.plan_id,
+                "source_report_id": self.source_report_id,
+                "days": self.plan_days,
+            }
+        if not self.report and self.draft_report:
+            self.report = self.draft_report
+        return self
 
 
 class HealthPlanAgentResponse(BaseModel):
@@ -101,7 +120,10 @@ def _valid_day(day: Any) -> bool:
     diet = day.get("diet") or {}
     exercise = day.get("exercise") or {}
     sleep = day.get("sleep") or {}
-    required_meals = all(isinstance(diet.get(key), list) and bool(diet.get(key)) for key in ("breakfast", "lunch", "dinner"))
+    required_meals = all(
+        isinstance(diet.get(key), list) and bool(diet.get(key))
+        for key in ("breakfast", "lunch", "dinner")
+    )
     valid_exercise = (
         isinstance(exercise.get("activity"), str)
         and bool(exercise.get("activity", "").strip())
@@ -122,7 +144,14 @@ def _valid_day(day: Any) -> bool:
         and isinstance(sleep.get("actions"), list)
         and bool(sleep.get("actions"))
     )
-    return required_meals and valid_exercise and valid_sleep and isinstance(day.get("observations"), list)
+    return (
+        required_meals
+        and isinstance(diet.get("avoid"), list)
+        and valid_exercise
+        and valid_sleep
+        and isinstance(day.get("observations"), list)
+        and bool(day.get("observations"))
+    )
 
 
 def _normalize_review(payload: dict[str, Any]) -> HealthPlanAgentResponse:
