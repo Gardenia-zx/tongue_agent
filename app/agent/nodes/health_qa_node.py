@@ -4,6 +4,7 @@ from typing import Any
 from app.agent.context_builder import effective_user_query, with_prompt_context
 from app.agent.state import AgentState
 from app.agent.nodes.rag_node_utils import answer_with_rag
+from app.agent.response_contract import structured_content_to_text
 
 
 DISCLAIMER = "以上内容用于一般健康知识说明和健康管理参考，不能替代医生诊断。"
@@ -131,6 +132,7 @@ async def health_qa_node(state: AgentState) -> AgentState:
         "sections": _structured_sections(raw_answer),
         "disclaimer": DISCLAIMER,
     }
+    content = _plain_text(raw_answer) or structured_content_to_text(structured_content) or summary
 
     return {
         **state,
@@ -139,7 +141,7 @@ async def health_qa_node(state: AgentState) -> AgentState:
         "response_message": {
             "role": "assistant",
             "content_type": "text",
-            "content": summary,
+            "content": content,
             "structured_content": structured_content,
         },
         "next_action": {

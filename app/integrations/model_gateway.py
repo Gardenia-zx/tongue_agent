@@ -212,13 +212,18 @@ class ChatModelClient:
         messages: list[dict[str, Any]],
         temperature: float,
         max_tokens: int,
+        response_format: dict[str, Any] | None = None,
         extra_body: dict[str, Any] | None = None,
     ) -> ChatGenerationResult:
+        merged_extra_body = dict(extra_body or {})
+        if response_format:
+            merged_extra_body["response_format"] = response_format
+
         data = await self._chat_completion(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            extra_body=extra_body,
+            extra_body=merged_extra_body or None,
         )
         choice = (data.get("choices") or [])[0]
         message = choice.get("message") or {}

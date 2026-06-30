@@ -1,6 +1,6 @@
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.core.locks import LockBusyError, redis_lock
 from app.core.turn_hash import canonical_agent_request_hash, response_hash
 from app.integrations.redis_client import create_redis_client
+from app.integrations.model_gateway import get_chat_model_client
 from app.integrations.turn_records import AgentTurnRecord, TurnStatus
 from app.schemas.agent import (
     AgentRunRequest,
@@ -38,6 +39,25 @@ class ReportCompareExplanationResponse(BaseModel):
     observation_suggestions: list[str] = Field(default_factory=list)
 
 
+class HealthPlanAgentRequest(BaseModel):
+    mode: Literal["review", "generate_detailed"]
+    plan_id: int | None = None
+    report_id: int | None = None
+    draft_report: dict[str, Any] = Field(default_factory=dict)
+    state_snapshot: dict[str, Any] = Field(default_factory=dict)
+    personalization_signals: list[str] = Field(default_factory=list)
+    plan_days: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class HealthPlanAgentResponse(BaseModel):
+    status: str
+    summary: str = ""
+    issues: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    recommended_action: str | None = None
+    days: list[dict[str, Any]] = Field(default_factory=list)
+
+
 @router.post("/report-compare", response_model=ReportCompareExplanationResponse)
 async def explain_report_compare(
     request: ReportCompareExplanationRequest,
@@ -60,6 +80,121 @@ async def explain_report_compare(
         explanation=explanation,
         observation_suggestions=suggestions,
     )
+
+
+@router.post("/health-plan/review", response_model=HealthPlanAgentResponse)
+async def review_health_plan(
+    request: HealthPlanAgentRequest,
+) -> HealthPlanAgentResponse:
+    try:
+        payload = await _call_health_plan_model(request)
+    except Exception as exc:
+        return HealthPlanAgentResponse(
+            status="FAILED",
+            summary=f"AI 健康计划处理失败：{type(exc).__name__}",
+            recommended_action="GENERATE_DETAILED",
+        )
+
+    if request.mode == "generate_detailed":
+        days = payload.get("days")
+        return HealthPlanAgentResponse(
+            status="COMPLETED" if isinstance(days, list) and len(days) == 7 else "FAILED",
+            summary=str(payload.get("summary") or ""),
+            days=days if isinstance(days, list) else [],
+        )
+
+    status = str(payload.get("status") or "")
+    if status not in {"REASONABLE", "NEEDS_IMPROVEMENT"}:
+        status = "REASONABLE" if _plan_complete(request.plan_days) else "NEEDS_IMPROVEMENT"
+    return HealthPlanAgentResponse(
+        status=status,
+        summary=str(payload.get("summary") or "AI 已完成健康计划评估。"),
+        issues=_string_list(payload.get("issues")),
+        suggestions=_string_list(payload.get("suggestions")),
+        recommended_action=str(
+            payload.get("recommended_action")
+            or ("ACTIVATE" if status == "REASONABLE" else "GENERATE_DETAILED")
+        ),
+    )
+
+
+async def _call_health_plan_model(request: HealthPlanAgentRequest) -> dict[str, Any]:
+    settings = get_settings()
+    if request.mode == "review":
+        instruction = (
+            "评估这份7天健康计划是否适合用户当前舌象报告和近期状态。"
+            "只返回JSON：status只能是REASONABLE或NEEDS_IMPROVEMENT，"
+            "还要包含summary、issues、suggestions、recommended_action。"
+        )
+        max_tokens = 900
+    else:
+        instruction = (
+            "生成一份更具体的7天健康计划。只返回JSON：status为COMPLETED，days为7项数组。"
+            "每天必须包含diet.breakfast/lunch/dinner/avoid，exercise.activity/durationMinutes/intensity/warmup/cooldown，"
+            "sleep.targetBedtime/targetWakeTime/actions，observations。"
+        )
+        max_tokens = min(4096, max(settings.report_model_max_tokens, 3500))
+
+    content = json.dumps(
+        {
+            "instruction": instruction,
+            "draft_report": request.draft_report,
+            "state_snapshot": request.state_snapshot,
+            "personalization_signals": request.personalization_signals,
+            "plan_days": request.plan_days,
+            "safety": "只做一般健康管理参考，不诊断疾病，不给药物处方；过敏、忌口、运动损伤优先。",
+        },
+        ensure_ascii=False,
+    )
+    raw = await get_chat_model_client().generate(
+        messages=[
+            {"role": "system", "content": "你是健康计划评估助手。必须只输出JSON，不要Markdown。"},
+            {"role": "user", "content": content},
+        ],
+        temperature=settings.report_model_temperature,
+        max_tokens=max_tokens,
+    )
+    return _extract_json_object(raw) or {}
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.replace("```json", "", 1).replace("```", "").strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            value = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip()[:180] for item in value if str(item).strip()][:8]
+
+
+def _plan_complete(days: list[dict[str, Any]]) -> bool:
+    if len(days) != 7:
+        return False
+    for day in days:
+        diet = day.get("diet") or {}
+        exercise = day.get("exercise") or {}
+        sleep = day.get("sleep") or {}
+        if not all(diet.get(key) for key in ("breakfast", "lunch", "dinner")):
+            return False
+        if not exercise.get("activity") or not exercise.get("durationMinutes") or not exercise.get("intensity"):
+            return False
+        if not sleep.get("targetBedtime") or not sleep.get("targetWakeTime") or not sleep.get("actions"):
+            return False
+    return True
 
 
 def _initial_state(request: AgentRunRequest) -> dict[str, Any]:

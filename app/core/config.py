@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     chat_model_name: str = "qwen2.5-7b-instruct"
     chat_model_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     chat_model_max_tokens: int = Field(default=800, ge=64, le=4096)
+    chat_model_json_mode_enabled: bool = False
+    detailed_followup_max_tokens: int = Field(default=2200, ge=512, le=4096)
     chat_model_max_concurrency: int = Field(default=4, ge=1, le=32)
     report_model_temperature: float = Field(default=0.15, ge=0.0, le=2.0)
     report_model_max_tokens: int = Field(default=2200, ge=512, le=4096)

@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+from app.agent.response_contract import looks_like_internal_json, normalize_structured_content
 from app.agent.state import AgentState
 from app.agent.tool_policy import can_use_report_followup
 
@@ -340,6 +341,12 @@ async def final_response_guard_node(state: AgentState) -> AgentState:
     elif not str(response.get("content") or "").strip():
         error_code = "INVALID_FINAL_RESPONSE"
         reason = "response_content_empty"
+    elif str(response.get("content_type") or "text") not in {"text", "structured"}:
+        error_code = "INVALID_FINAL_RESPONSE"
+        reason = "response_content_type_invalid"
+    elif looks_like_internal_json(str(response.get("content") or "")):
+        error_code = "RAW_JSON_RESPONSE_BLOCKED"
+        reason = "internal_json_leaked_to_user"
     elif isinstance(next_action, dict) and not _artifact_owned_by_current_turn(
         next_action, state
     ):
@@ -354,6 +361,14 @@ async def final_response_guard_node(state: AgentState) -> AgentState:
         )
         guard_status = "REPAIRED"
     else:
+        if isinstance(response, dict) and response.get("structured_content") is not None:
+            normalized = normalize_structured_content(response.get("structured_content"))
+            response = dict(response)
+            if normalized:
+                response["structured_content"] = normalized
+            else:
+                response.pop("structured_content", None)
+            state = {**state, "response_message": response}
         guarded = stamp_current_turn_artifacts(state)
         guard_status = "PASSED"
 

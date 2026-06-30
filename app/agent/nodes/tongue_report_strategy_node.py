@@ -61,30 +61,55 @@ def _template_builder_with_defaults(
     tongue_features: dict[str, Any],
     feature_names: list[str],
     user_description: str,
+    state_snapshot: dict[str, Any] | None = None,
+    personalization_signals: list[str] | None = None,
 ) -> dict[str, Any]:
+    """
+    在原始 Schema 2.0 模板的基础上补充完整采用的舌象维度。
+
+    必须完整转发原模板函数的参数，避免新增报告上下文后，
+    策略包装器与原始函数签名不一致。
+    """
     structured = _original_template_builder(
         tongue_features=tongue_features,
         feature_names=feature_names,
         user_description=user_description,
+        state_snapshot=state_snapshot,
+        personalization_signals=personalization_signals,
     )
+
     adopted = _adopted_feature_text(tongue_features)
     if not adopted:
         return structured
 
-    description = user_description.strip()
-    summary = (
-        f"本次舌象整体可概括为：{adopted}。"
-        "可先从饮食规律、睡眠恢复、适度运动和胃肠状态四个方向进行连续三天的健康管理观察。"
-    )
-    if description:
-        summary += f"结合你补充的“{description}”，报告中的计划已优先围绕这一诉求进行调整。"
-    summary += "以上内容用于日常健康管理参考，不作为疾病诊断。"
+    # 保留原始模板根据近期状态生成的个性化内容，
+    # 只在前面补充本次实际采用的舌象特征，不再整段覆盖。
+    existing_summary = str(
+        structured.get("comprehensive_summary")
+        or structured.get("summary")
+        or ""
+    ).strip()
 
-    explanation = (
-        f"综合采用的舌象特征为{adopted}。"
-        "这类整体表现更适合结合近期饮食、作息、口腔清洁、排便和精神恢复情况进行动态理解，"
-        "重点观察连续变化，而不是仅凭一次照片作确定判断。"
-    )
+    feature_summary = f"本次舌象整体可概括为：{adopted}。"
+
+    if feature_summary not in existing_summary:
+        summary = f"{feature_summary}{existing_summary}"
+    else:
+        summary = existing_summary
+
+    existing_explanation = str(
+        structured.get("tongue_feature_explanation")
+        or structured.get("health_interpretation")
+        or ""
+    ).strip()
+
+    feature_explanation = f"综合采用的舌象特征为{adopted}。"
+
+    if feature_explanation not in existing_explanation:
+        explanation = f"{feature_explanation}{existing_explanation}"
+    else:
+        explanation = existing_explanation
+
     structured["comprehensive_summary"] = summary
     structured["summary"] = summary
     structured["tongue_feature_explanation"] = explanation
@@ -93,8 +118,11 @@ def _template_builder_with_defaults(
     for section in structured.get("sections") or []:
         if not isinstance(section, dict):
             continue
-        if section.get("section_key") == "tongue_feature_explanation":
+
+        section_key = section.get("section_key") or section.get("sectionKey")
+        if section_key == "tongue_feature_explanation":
             section["content"] = explanation
+
     return structured
 
 

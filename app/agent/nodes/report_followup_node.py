@@ -4,6 +4,7 @@ from typing import Any
 
 from app.agent.context_builder import current_turn_from_state, effective_user_query, with_prompt_context
 from app.agent.nodes.rag_node_utils import answer_with_rag
+from app.agent.response_contract import is_final_answer_candidate
 from app.agent.state import AgentState
 from app.core.config import get_settings
 
@@ -28,7 +29,8 @@ FOLLOWUP_REPORT_PROMPT = """你是舌象健康报告的追问助手。
 8. 不要输出 Markdown 标题符号，不要输出分隔线。
 9. 如果提供了 rag_context，要结合知识库检索结果给出一般健康管理参考。
 10. 如果用户要求“更详细的报告、完整报告、重新生成详细报告”，要输出一份完整的舌象健康参考报告，不要只给几个观察点。
-11. content 只写 1 到 3 句摘要，详细内容只放在 structured_content.sections，避免重复输出。
+11. content 必须是完整自然语言回答，即使前端不渲染 structured_content，用户也能直接读懂。
+    普通追问至少包含直接回答和具体建议；详细追问要包含识别结果、解释、饮食、运动和继续观察等维度。
 12. 如果用户要求饮食推荐、运动推荐或详细建议，sections 必须包含“饮食建议”和“每日运动建议”。
 13. 返回 JSON：
 {
@@ -651,7 +653,7 @@ async def generate_report_followup_reply(
         else settings.chat_model_temperature
     )
     model_max_tokens = (
-        settings.report_model_max_tokens
+        settings.detailed_followup_max_tokens
         if detailed_request
         else settings.chat_model_max_tokens
     )
@@ -670,6 +672,9 @@ async def generate_report_followup_reply(
                 messages=messages,
                 temperature=model_temperature,
                 max_tokens=model_max_tokens,
+                response_format={"type": "json_object"}
+                if settings.chat_model_json_mode_enabled
+                else None,
             )
             raw_content = result.content
         else:
@@ -682,7 +687,7 @@ async def generate_report_followup_reply(
     except Exception:
         payload = None
 
-    if isinstance(payload, dict):
+    if isinstance(payload, dict) and is_final_answer_candidate(payload):
         content = payload.get("content")
         if isinstance(content, str) and content.strip():
             normalized_content = clean_text(content, max_length=1800)

@@ -10,6 +10,11 @@ from app.agent.context_builder import (
     with_prompt_context,
 )
 from app.agent.nodes.rag_node_utils import answer_with_rag
+from app.agent.response_contract import (
+    final_answer_from_text,
+    looks_like_internal_json as _looks_like_internal_json,
+    structured_content_to_text,
+)
 from app.agent.state import AgentState
 from app.agent.tooling import (
     GENERAL_CHAT_TOOL,
@@ -81,8 +86,11 @@ AGENT_LOOP_SYSTEM_PROMPT = """你是中医舌象健康 Agent 的工具调用决�
 - 最终回答只能输出一个 JSON object。
 - 不要在 JSON 前后添加解释文字。
 - 不要使用 ```json 代码块。
-- content 只能是一段简短自然语言摘要，120 字以内，不要放 Markdown 标题、列表、代码块或 JSON 字符串。
-- 详细分段内容放在 structured_content.sections 中，不要把完整报告重复塞进 content。
+- content 必须是可以直接展示给用户的完整中文自然语言回答，不能只写一句摘要。
+- 普通健康问答通常至少 3 个完整句子，包含直接回答和解释或建议。
+- 用户要求“详细一点、继续、展开说说、具体一点、不够详细”时，必须承接上一轮并增加信息量。
+- structured_content 只用于增强展示；即使前端不渲染 structured_content，content 也必须可独立阅读。
+- content 禁止出现 JSON、内部字段、工具调用记录、系统规则和推理过程。
 - 如果你刚刚调用的业务工具已经返回 structured_content，最终回答必须优先复用该 structured_content，不要重新把它包成 Markdown 或代码块。
 """
 
@@ -463,26 +471,12 @@ def _summarize_state(state: AgentState) -> dict[str, Any]:
 
 
 def _state_from_final_answer(state: AgentState, content: str) -> AgentState:
-    payload = _extract_json_object(content) or {}
-    if payload.get("type") == "final_answer":
-        structured_content = _normalize_structured_content(
-            payload.get("structured_content") or payload.get("structuredContent")
-        )
-        final_content = _content_for_display(
-            str(payload.get("content") or "").strip(),
-            structured_content,
-        )
-    else:
-        if _looks_like_malformed_final_answer(content) and state.get("response_message"):
-            return state
-        final_content = content.strip()
-        structured_content = None
-
-    if not final_content:
+    parsed = final_answer_from_text(content)
+    if parsed is None:
         return _fallback_from_last_tool(state)
 
-    final_content = _clean_final_content(final_content)
-    if not final_content:
+    final_content, structured_content = parsed
+    if not final_content or _looks_like_internal_json(final_content):
         return _fallback_from_last_tool(state)
 
     response_message: dict[str, Any] = {
@@ -638,18 +632,10 @@ def _content_for_display(
     content: str,
     structured_content: dict[str, Any] | None,
 ) -> str:
-    if structured_content:
-        summary = _plain_text(str(structured_content.get("summary") or ""))
-        if summary:
-            return _limit_text(summary, 120)
-        title = _plain_text(str(structured_content.get("title") or ""))
-        if title:
-            return title
-
     plain = _plain_text(content)
     if _looks_like_malformed_final_answer(plain):
-        return ""
-    return _limit_text(plain, 160)
+        return structured_content_to_text(structured_content)
+    return plain or structured_content_to_text(structured_content)
 
 
 def _plain_text(text: str) -> str:

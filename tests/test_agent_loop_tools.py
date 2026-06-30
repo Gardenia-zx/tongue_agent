@@ -464,7 +464,7 @@ class TestAgentLoopTools(unittest.IsolatedAsyncioTestCase):
         ):
             result = await agent_loop_node(gated)
 
-        self.assertEqual("Clean summary for display.", result["response_message"]["content"])
+        self.assertEqual("Detailed report\nThis should be normalized.", result["response_message"]["content"])
         self.assertEqual(
             "Detailed tongue report",
             result["response_message"]["structured_content"]["title"],
