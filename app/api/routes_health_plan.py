@@ -48,6 +48,12 @@ class HealthPlanExercise(BaseModel):
     def clean_actions(cls, values: list[str]) -> list[str]:
         return [str(value).strip()[:100] for value in values if str(value).strip()][:8]
 
+    @model_validator(mode="after")
+    def require_warmup_and_cooldown(self) -> "HealthPlanExercise":
+        if not self.warmup or not self.cooldown:
+            raise ValueError("warmup and cooldown must both be present")
+        return self
+
 
 class HealthPlanSleep(BaseModel):
     targetBedtime: str
@@ -85,9 +91,13 @@ class HealthPlanDay(BaseModel):
         return [str(value).strip()[:120] for value in values if str(value).strip()][:12]
 
     @model_validator(mode="after")
-    def require_meals(self) -> "HealthPlanDay":
+    def require_complete_day(self) -> "HealthPlanDay":
         if not self.diet.breakfast or not self.diet.lunch or not self.diet.dinner:
             raise ValueError("breakfast, lunch and dinner must all be present")
+        if not self.diet.avoid:
+            raise ValueError("avoid items must be present")
+        if not self.observations:
+            raise ValueError("observations must be present")
         return self
 
 
@@ -164,9 +174,9 @@ GENERATION_SYSTEM_PROMPT = """你是 7 天健康管理计划生成助手。只�
 强制规则：
 1. 必须返回完整 7 天，dayIndex 从 1 到 7 且不重复。
 2. 每天都包含早餐、午餐、晚餐和避免项；食物必须具体并带合理份量示例。
-3. 每天运动必须包含 activity、durationMinutes、intensity、warmup、cooldown。
+3. 每天运动必须包含 activity、durationMinutes、intensity、warmup、cooldown，热身和放松都不得为空。
 4. 每天睡眠必须包含 targetBedtime、targetWakeTime、actions，时间格式 HH:mm。
-5. 每天包含 observations。
+5. 每天包含至少一个 observations。
 6. 优先保留用户草稿中明确修改过的偏好；自由描述中的过敏、忌口、运动损伤或“不喝牛奶”等限制不得冲突。
 7. 内容以常见、容易获得的日常食物和低风险活动为主，不进行极端节食或突然高强度训练。
 8. 不自动启用计划，只返回可供用户确认的草稿。
@@ -220,7 +230,6 @@ async def review_or_generate_health_plan(
         return HealthPlanAgentResponse(
             status="COMPLETED",
             summary=payload.summary,
-            recommended_action=None,
             days=payload.days,
         )
     except (ModelGatewayError, ValidationError, ValueError, json.JSONDecodeError) as exc:
@@ -233,15 +242,26 @@ async def review_or_generate_health_plan(
 
 
 async def _call_model(system_prompt: str, context: str, *, max_tokens: int) -> str:
-    return await get_chat_model_client().generate(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": context},
-        ],
-        temperature=0.2,
-        max_tokens=max_tokens,
-        extra_body={"response_format": {"type": "json_object"}},
-    )
+    client = get_chat_model_client()
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": context},
+    ]
+    try:
+        return await client.generate(
+            messages=messages,
+            temperature=0.2,
+            max_tokens=max_tokens,
+            extra_body={"response_format": {"type": "json_object"}},
+        )
+    except ModelGatewayError as exc:
+        if "response_format" not in str(exc).lower():
+            raise
+        return await client.generate(
+            messages=messages,
+            temperature=0.2,
+            max_tokens=max_tokens,
+        )
 
 
 def _build_context(request: HealthPlanAgentRequest) -> str:
