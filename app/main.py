@@ -7,6 +7,7 @@ from fastapi.responses import ORJSONResponse
 from app.agent.graph import compile_agent_graph
 from app.api.routes_agent import router as agent_router
 from app.api.routes_health import router as health_router
+from app.api.routes_health_plan import router as health_plan_router
 from app.core.config import get_settings
 from app.core.event_loop import configure_asyncio_event_loop_policy
 from app.integrations.langgraph_persistence import open_langgraph_persistence
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(agent_router, prefix="/api/v1")
+    app.include_router(health_plan_router, prefix="/api/v1")
 
     return app
 
