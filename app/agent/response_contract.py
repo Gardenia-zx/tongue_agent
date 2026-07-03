@@ -26,6 +26,19 @@ INTERNAL_JSON_MARKERS = (
     '"final_answer"',
 )
 
+_FINAL_ANSWER_TYPE_PATTERN = re.compile(
+    r'["\']type["\']\s*:\s*["\']final_answer["\']',
+    flags=re.IGNORECASE,
+)
+_STRUCTURED_CONTENT_PATTERN = re.compile(
+    r'["\'](?:structured_content|structuredContent)["\']\s*:',
+    flags=re.IGNORECASE,
+)
+_CONTENT_FIELD_PATTERN = re.compile(
+    r'["\']content["\']\s*:\s*"',
+    flags=re.IGNORECASE,
+)
+
 
 def plain_text(value: Any) -> str:
     text = str(value or "").strip()
@@ -44,11 +57,21 @@ def looks_like_internal_json(text: str) -> bool:
     compact = text.strip()
     if not compact:
         return False
+
+    # Catch wrappers even when the model prepends prose such as
+    # "根据已有报告，不需要调用工具" before the JSON object.
+    if _FINAL_ANSWER_TYPE_PATTERN.search(compact):
+        return True
+
+    marker_count = sum(1 for marker in INTERNAL_JSON_MARKERS if marker in compact)
+    if "{" in compact and "}" in compact and marker_count >= 2:
+        return True
+
     if compact.startswith("```json"):
         return True
-    if "```json" in compact and any(marker in compact for marker in INTERNAL_JSON_MARKERS):
+    if "```json" in compact and marker_count > 0:
         return True
-    if compact.startswith("{") and any(marker in compact for marker in INTERNAL_JSON_MARKERS):
+    if compact.startswith("{") and marker_count > 0:
         return True
     return False
 
@@ -81,6 +104,37 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
         if candidate.get("type") == "final_answer":
             return candidate
     return candidates[0] if candidates else None
+
+
+def extract_loose_final_answer_content(text: str) -> str:
+    """Recover the display content from a malformed final-answer wrapper.
+
+    Some OpenAI-compatible models occasionally prepend prose and then emit a
+    JSON-looking object with literal newlines or unescaped quotes inside the
+    ``content`` string. That object is not valid JSON, but the content can still
+    be recovered safely by slicing between the top-level ``content`` and
+    ``structured_content`` fields. This function never returns internal fields.
+    """
+
+    if not _FINAL_ANSWER_TYPE_PATTERN.search(text):
+        return ""
+
+    content_match = _CONTENT_FIELD_PATTERN.search(text)
+    if content_match is None:
+        return ""
+
+    structured_match = _STRUCTURED_CONTENT_PATTERN.search(text, content_match.end())
+    if structured_match is None:
+        return ""
+
+    raw = text[content_match.end() : structured_match.start()]
+    # The field separator contributes the closing quote and comma. Remove only
+    # those boundary characters; quotes inside the answer remain untouched.
+    raw = re.sub(r'"\s*,\s*$', "", raw, count=1).strip()
+    raw = raw.replace("\\r\\n", "\n").replace("\\n", "\n")
+    raw = raw.replace("\\t", "\t").replace('\\"', '"')
+    raw = raw.replace("\\/", "/")
+    return plain_text(raw)
 
 
 def is_final_answer_candidate(payload: dict[str, Any]) -> bool:
@@ -167,6 +221,14 @@ def final_answer_from_text(text: str) -> tuple[str, dict[str, Any] | None] | Non
         )
         content = content_for_display(str(payload.get("content") or ""), structured)
         return (content, structured) if content else None
+
+    # Repair the common malformed form before treating the whole model output as
+    # natural language. Without this branch, a prose prefix followed by invalid
+    # JSON bypasses the raw-JSON guard and is displayed verbatim to the user.
+    loose_content = extract_loose_final_answer_content(text)
+    if loose_content and not looks_like_internal_json(loose_content):
+        return loose_content, None
+
     if looks_like_internal_json(text):
         return None
     content = plain_text(text)
