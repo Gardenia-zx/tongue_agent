@@ -1,5 +1,6 @@
 import unittest
 
+from app.agent.nodes.agent_loop_node import _state_from_final_answer
 from app.agent.response_contract import (
     final_answer_from_text,
     looks_like_internal_json,
@@ -51,6 +52,24 @@ class ResponseContractTests(unittest.TestCase):
         self.assertNotIn("structured_content", content)
         self.assertNotIn('"type"', content)
         self.assertIsNone(structured)
+
+    def test_runtime_state_builder_does_not_expose_wrapper(self) -> None:
+        raw = '''我已经根据报告整理好了。
+{
+  "type": "final_answer",
+  "content": "上一次报告显示舌质淡红、舌苔薄白，整体偏正常。",
+  "structured_content": {
+    "answer_type": "REPORT_FOLLOWUP",
+    "summary": "报告整体偏正常"
+  }
+}'''
+
+        result = _state_from_final_answer({"turn_id": "turn-1"}, raw)
+        content = str((result.get("response_message") or {}).get("content") or "")
+
+        self.assertEqual("上一次报告显示舌质淡红、舌苔薄白，整体偏正常。", content)
+        self.assertNotIn("final_answer", content)
+        self.assertNotIn("structured_content", content)
 
     def test_prefixed_internal_wrapper_is_not_treated_as_plain_text(self) -> None:
         raw = (
